@@ -9,7 +9,7 @@ use super::message::{RtnlMessage, RtnlSegment};
 use crate::{
     net::socket::netlink::{
         addr::PortNum,
-        message::{ErrorSegment, ProtocolSegment},
+        message::{ErrorSegment, ProtocolSegment, SegHdrCommonFlags},
         table::{NetlinkRouteProtocol, SupportedNetlinkProtocol},
     },
     prelude::*,
@@ -17,6 +17,7 @@ use crate::{
 
 mod addr;
 mod link;
+mod route;
 mod util;
 
 pub(super) struct NetlinkRouteKernelSocket {
@@ -37,7 +38,10 @@ impl NetlinkRouteKernelSocket {
 
         let response_segments = match request {
             RtnlSegment::GetLink(request_segment) => link::do_get_link(request_segment),
+            RtnlSegment::NewLink(request_segment) => link::do_new_link(request_segment),
             RtnlSegment::GetAddr(request_segment) => addr::do_get_addr(request_segment),
+            RtnlSegment::NewAddr(request_segment) => addr::do_new_addr(request_segment),
+            RtnlSegment::GetRoute(request_segment) => route::do_get_route(request_segment),
             _ => Err(Error::with_message(
                 Errno::EOPNOTSUPP,
                 "the netlink route request is not supported",
@@ -45,6 +49,17 @@ impl NetlinkRouteKernelSocket {
         };
 
         let response = match response_segments {
+            // A write request (e.g. RTM_NEWLINK/RTM_NEWADDR) produces no response
+            // segments. If the request asked for an acknowledgment, reply with a
+            // success (error code 0) error segment, as Linux does.
+            Ok(segments) if segments.is_empty() => {
+                let flags = SegHdrCommonFlags::from_bits_truncate(request_header.flags);
+                if flags.contains(SegHdrCommonFlags::ACK) {
+                    let ack = ErrorSegment::new_from_request(request_header, None);
+                    self.report_error(ack, dst_port);
+                }
+                return;
+            }
             Ok(segments) => RtnlMessage::new(segments),
             Err(error) => {
                 // TODO: Deal with the `NetlinkMessageCommonFlags::ACK` flag.

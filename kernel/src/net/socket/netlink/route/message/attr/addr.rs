@@ -62,26 +62,34 @@ impl Attribute for AddrAttr {
         Self: Sized,
     {
         let payload_len = header.payload_len();
-        reader.skip_some(payload_len);
 
-        // GETADDR only supports dump requests. These requests do not have any attributes.
-        // According to the Linux behavior, we should just ignore all the attributes.
+        // GETADDR dump requests carry no attributes; RTM_NEWADDR requests carry
+        // the address to assign (IFA_ADDRESS / IFA_LOCAL) and optionally a label.
+        let Ok(class) = AddrAttrClass::try_from(header.type_()) else {
+            // Unknown attributes are ignored.
+            reader.skip_some(payload_len);
+            return Ok(ContinueRead::Skipped);
+        };
 
-        Ok(ContinueRead::Skipped)
-    }
+        let res = match (class, payload_len) {
+            (AddrAttrClass::ADDRESS, 4) => {
+                Self::Address(reader.read_val_opt::<[u8; 4]>()?.unwrap())
+            }
+            (AddrAttrClass::LOCAL, 4) => Self::Local(reader.read_val_opt::<[u8; 4]>()?.unwrap()),
+            (AddrAttrClass::LABEL, _) => {
+                let (label, consumed) = reader.read_cstring_until_end(payload_len)?;
+                if consumed < payload_len {
+                    reader.skip_some(payload_len - consumed);
+                }
+                Self::Label(label)
+            }
+            _ => {
+                // Other (or malformed) attributes are not needed for assignment.
+                reader.skip_some(payload_len);
+                return Ok(ContinueRead::Skipped);
+            }
+        };
 
-    fn read_all_from(
-        reader: &mut dyn MultiRead,
-        total_len: usize,
-    ) -> Result<ContinueRead<Vec<Self>>>
-    where
-        Self: Sized,
-    {
-        reader.skip_some(total_len);
-
-        // GETADDR only supports dump requests. These requests do not have any attributes.
-        // According to the Linux behavior, we should just ignore all the attributes.
-
-        Ok(ContinueRead::Skipped)
+        Ok(ContinueRead::Parsed(res))
     }
 }

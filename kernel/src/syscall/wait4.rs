@@ -42,7 +42,10 @@ pub fn sys_wait4(
         return Ok(SyscallReturn::Return(0 as _));
     };
 
-    let (return_pid, status_code) = (wait_status.pid(), calculate_status_code(&wait_status));
+    let (return_pid, status_code) = (
+        wait_status.pid_in_ns(ctx.process.pid_ns()),
+        calculate_status_code(&wait_status),
+    );
     if status_ptr != 0 {
         ctx.user_space().write_val(status_ptr as _, &status_code)?;
     }

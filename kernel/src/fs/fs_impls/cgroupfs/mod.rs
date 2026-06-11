@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 pub use cgroup_ns::CgroupNamespace;
-pub use controller::cpu::{CpuStatKind, charge_cpu_time};
+pub use controller::{
+    cpu::{
+        CpuStatKind, charge_cpu_bandwidth, charge_cpu_time, is_cpu_throttled,
+        throttle_cpu_if_needed,
+    },
+    process_memory_max,
+};
 use fs::CgroupFsType;
 pub(in crate::fs) use systree_node::CgroupSystem;
 pub use systree_node::{CgroupMembership, CgroupNode, CgroupSysNode};

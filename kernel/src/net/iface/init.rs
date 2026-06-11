@@ -59,7 +59,11 @@ pub fn init() {
     poll_ifaces();
 }
 
-fn new_loopback() -> Arc<Iface> {
+/// Creates a fresh, independent loopback interface.
+///
+/// Each network namespace owns its own loopback, so this is called both at boot
+/// (for the initial namespace) and when a new network namespace is created.
+pub(in crate::net) fn new_loopback() -> Arc<Iface> {
     use aster_bigtcp::{
         device::{Loopback, Medium},
         iface::IpIface,

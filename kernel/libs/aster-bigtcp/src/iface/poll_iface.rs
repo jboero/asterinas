@@ -56,6 +56,42 @@ impl<E: Ext> PollableIface<E> {
             .map(|ip_addr| ip_addr.prefix_len())
     }
 
+    /// Returns the IPv4 default-route gateway, if one is configured.
+    pub(super) fn ipv4_gateway(&mut self) -> Option<smoltcp::wire::Ipv4Address> {
+        let mut gateway = None;
+        self.interface.routes_mut().update(|routes| {
+            gateway = routes
+                .iter()
+                .find_map(|route| match (route.cidr, route.via_router) {
+                    (smoltcp::wire::IpCidr::Ipv4(cidr), smoltcp::wire::IpAddress::Ipv4(gw))
+                        if cidr.prefix_len() == 0 =>
+                    {
+                        Some(gw)
+                    }
+                    _ => None,
+                });
+        });
+        gateway
+    }
+
+    /// Replaces the interface's IPv4 address (and on-link subnet) with `cidr`.
+    ///
+    /// Any existing IPv4 address is removed; an IPv6 address, if present, is kept.
+    /// This is the kernel side of `RTM_NEWADDR` for an IPv4 address.
+    pub(super) fn set_ipv4_cidr(&mut self, cidr: smoltcp::wire::Ipv4Cidr) {
+        self.interface.update_ip_addrs(|ip_addrs| {
+            let ipv6 = ip_addrs
+                .iter()
+                .copied()
+                .find(|c| matches!(c, smoltcp::wire::IpCidr::Ipv6(_)));
+            ip_addrs.clear();
+            let _ = ip_addrs.push(smoltcp::wire::IpCidr::Ipv4(cidr));
+            if let Some(ipv6) = ipv6 {
+                let _ = ip_addrs.push(ipv6);
+            }
+        });
+    }
+
     /// Returns the next poll time.
     pub(super) fn next_poll_at_ms(&self) -> Option<u64> {
         self.pending_conns.next_poll_at_ms()

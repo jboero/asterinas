@@ -24,7 +24,7 @@ use crate::{
 };
 
 pub(super) struct InitStream {
-    bound_port: Option<BoundTcpPort>,
+    bound_ports: Vec<BoundTcpPort>,
     /// The address family of this socket (IPv4 or IPv6).
     //
     // TODO: Encode the address family in the type system (e.g., `InitStream<IPv4Family>`)
@@ -55,7 +55,7 @@ pub(super) struct InitStream {
 impl InitStream {
     pub(super) fn new(family: IpAddressFamily) -> Self {
         Self {
-            bound_port: None,
+            bound_ports: Vec::new(),
             family,
             is_connect_done: true,
             is_conn_refused: AtomicBool::new(false),
@@ -64,7 +64,7 @@ impl InitStream {
 
     pub(super) fn new_bound(bound_port: BoundTcpPort, family: IpAddressFamily) -> Self {
         Self {
-            bound_port: Some(bound_port),
+            bound_ports: vec![bound_port],
             family,
             is_connect_done: true,
             is_conn_refused: AtomicBool::new(false),
@@ -73,7 +73,7 @@ impl InitStream {
 
     pub(super) fn new_refused(bound_port: BoundTcpPort, family: IpAddressFamily) -> Self {
         Self {
-            bound_port: Some(bound_port),
+            bound_ports: vec![bound_port],
             family,
             is_connect_done: false,
             is_conn_refused: AtomicBool::new(true),
@@ -86,7 +86,7 @@ impl InitStream {
     }
 
     pub(super) fn bind(&mut self, endpoint: &IpEndpoint, can_reuse: bool) -> Result<()> {
-        if self.bound_port.is_some() {
+        if !self.bound_ports.is_empty() {
             return_errno_with_message!(Errno::EINVAL, "the socket is already bound to an address");
         }
 
@@ -99,17 +99,33 @@ impl InitStream {
             );
         }
 
-        self.bound_port = Some(bind_port(endpoint, can_reuse)?);
+        // Lazy wildcard bind: `bind(0.0.0.0:0)` only asks for an ephemeral
+        // source port. Stay unbound and let `connect`'s ephemeral-bind branch
+        // pick the interface that suits the remote, which handles both
+        // loopback and external peers correctly.
+        if endpoint.addr.is_unspecified() && endpoint.port == 0 {
+            return Ok(());
+        }
+
+        // Wildcard bind with an explicit port (`bind(0.0.0.0:PORT)`): reserve
+        // the port on every interface in this namespace, so a later `listen`
+        // accepts connections arriving on any of them.
+        if endpoint.addr.is_unspecified() {
+            self.bound_ports = bind_port_on_all_ifaces(endpoint, can_reuse)?;
+            return Ok(());
+        }
+
+        self.bound_ports = vec![bind_port(endpoint, can_reuse)?];
 
         Ok(())
     }
 
     pub(super) fn bound_port(&self) -> Option<&BoundTcpPort> {
-        self.bound_port.as_ref()
+        self.bound_ports.first()
     }
 
     pub(super) fn connect(
-        self,
+        mut self,
         remote_endpoint: &IpEndpoint,
         option: &RawTcpOption,
         can_reuse: bool,
@@ -132,8 +148,17 @@ impl InitStream {
             ));
         }
 
-        let bound_port = if let Some(bound_port) = self.bound_port {
-            bound_port
+        let mut bound_ports = core::mem::take(&mut self.bound_ports);
+        let bound_port = if !bound_ports.is_empty() {
+            // A wildcard bind holds one port per interface; keep the one whose
+            // interface suits the remote and release the others.
+            let iface =
+                crate::net::net_ns::NetNamespace::current().ephemeral_iface(&remote_endpoint.addr);
+            let pos = bound_ports
+                .iter()
+                .position(|bp| Arc::ptr_eq(bp.iface(), &iface))
+                .unwrap_or(0);
+            bound_ports.swap_remove(pos)
         } else {
             let endpoint = match get_ephemeral_endpoint(remote_endpoint) {
                 Some(ep) => ep,
@@ -201,19 +226,24 @@ impl InitStream {
             ));
         }
 
-        let Some(bound_port) = self.bound_port else {
+        if self.bound_ports.is_empty() {
             // FIXME: The socket should be bound to INADDR_ANY (i.e., 0.0.0.0) with an ephemeral
-            // port. However, INADDR_ANY is not yet supported, so we need to return an error first.
+            // port. That requires picking an ephemeral port free on all interfaces; defer it.
             warn!("listen() without bind() is not implemented");
             return Err((
                 Error::with_message(Errno::EINVAL, "listen() without bind() is not implemented"),
                 self,
             ));
-        };
+        }
 
-        match ListenStream::new(bound_port, backlog, option, observer) {
+        let family = self.family;
+        match ListenStream::new(self.bound_ports, backlog, option, observer) {
             Ok(listen_stream) => Ok(listen_stream),
-            Err((bound_port, error)) => Err((error, Self::new_bound(bound_port, self.family))),
+            Err((bound_ports, error)) => {
+                let mut stream = Self::new(family);
+                stream.bound_ports = bound_ports;
+                Err((error, stream))
+            }
         }
     }
 
@@ -245,8 +275,8 @@ impl InitStream {
     }
 
     pub(super) fn local_endpoint(&self) -> Option<IpEndpoint> {
-        self.bound_port
-            .as_ref()
+        self.bound_ports
+            .first()
             .map(|bound_port| bound_port.endpoint())
     }
 
@@ -271,6 +301,14 @@ impl InitStream {
             None
         }
     }
+}
+
+fn bind_port_on_all_ifaces(endpoint: &IpEndpoint, can_reuse: bool) -> Result<Vec<BoundTcpPort>> {
+    crate::net::socket::ip::common::bind_port_on_all_ifaces_with(
+        endpoint,
+        can_reuse,
+        |iface, config| iface.bind_tcp(config),
+    )
 }
 
 fn bind_port(endpoint: &IpEndpoint, can_reuse: bool) -> Result<BoundTcpPort> {

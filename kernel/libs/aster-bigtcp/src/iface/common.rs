@@ -129,6 +129,14 @@ impl<E: Ext> IfaceCommon<E> {
         self.interface.lock().prefix_len()
     }
 
+    pub(super) fn set_ipv4_cidr(&self, cidr: smoltcp::wire::Ipv4Cidr) {
+        self.interface.lock().set_ipv4_cidr(cidr);
+    }
+
+    pub(super) fn ipv4_gateway(&self) -> Option<Ipv4Address> {
+        self.interface.lock().ipv4_gateway()
+    }
+
     pub(super) fn sched_poll(&self) -> &E::ScheduleNextPoll {
         &self.sched_poll
     }

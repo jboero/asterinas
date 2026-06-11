@@ -12,7 +12,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        Credentials, ProcessVm, UserNamespace, pid_table,
+        Credentials, PidNamespace, ProcessVm, UserNamespace, pid_table,
         posix_thread::{PosixThreadBuilder, ThreadName, allocate_posix_tid},
         program_loader::ProgramToLoad,
         rlimit::new_resource_limits_for_init,
@@ -101,8 +101,13 @@ fn create_init_process(
     let oom_score_adj = 0;
     let sig_dispositions = Arc::new(Mutex::new(SigDispositions::default()));
     let user_ns = UserNamespace::get_init_singleton().clone();
+    let pid_ns = PidNamespace::get_init_singleton().clone();
 
+    // The init process lives in the initial PID namespace, where its
+    // namespace-local PID equals its global PID.
     let init_proc = Process::new(
+        pid,
+        pid_ns,
         pid,
         vmar.clone_arc(),
         resource_limits,

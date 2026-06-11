@@ -138,8 +138,17 @@ impl SocketPrivate for DatagramSocket {
 
 impl Socket for DatagramSocket {
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
-        let endpoint = socket_addr.try_into()?;
+        let endpoint: IpEndpoint = socket_addr.try_into()?;
         let can_reuse = self.options.read().socket.reuse_addr();
+
+        // Lazy wildcard bind: `bind(0.0.0.0:0)` (or `[::]:0`) only asks for an
+        // ephemeral source. Interfaces own specific addresses here (there is no
+        // all-interface port table yet), so defer the real binding to the first
+        // `connect`/`sendto`, which picks the interface that suits the remote
+        // (loopback for loopback peers, the default interface otherwise).
+        if endpoint.addr.is_unspecified() && endpoint.port == 0 {
+            return Ok(());
+        }
 
         self.inner
             .write()

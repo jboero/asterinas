@@ -39,3 +39,14 @@ cachix.list
 
 # temporary configuration file for NixOS tests
 distro/etc_nixos/_config_for_test.nix
+
+# astrokube experiment scaffolding (separate project; not part of the kernel)
+/astrokube/
+/astrokube-run.sh
+/run-host-qemu.sh
+/qemu-host.log
+/qemu-serial-host.log
+/qemu-serial.log
+/target/nixos/
+/test/initramfs/build/*.qcow2
+/test/initramfs/build/*.img

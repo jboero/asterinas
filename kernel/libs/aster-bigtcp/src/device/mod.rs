@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod veth;
+
 pub use smoltcp::phy::{
     Checksum, ChecksumCapabilities, Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken,
 };
+pub use veth::{VethChannel, VethDevice, VethNotifier};
 
 /// A trait that allows to obtain a mutable reference of [`Device`].
 ///

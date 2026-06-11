@@ -26,7 +26,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        NsProxy, UserNamespace,
+        NsProxy, PidNamespace, UserNamespace,
         pid_file::PidFile,
         posix_thread::{PosixThread, ThreadLocal, allocate_posix_tid},
         stats::PROCESS_CREATION_COUNTER,
@@ -226,6 +226,15 @@ impl CloneArgs {
                     "`CLONE_THREAD` cannot be used together with `CLONE_PIDFD` or `CLONE_NEWUSER`"
                 );
             }
+
+            // A thread shares its process's PID namespace, so it cannot create a
+            // new one.
+            if clone_flags.contains(CloneFlags::CLONE_NEWPID) {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "`CLONE_THREAD` cannot be used together with `CLONE_NEWPID`"
+                );
+            }
         }
 
         // Reject invalid argument combinations related to the CLONE_SIGHAND flag.
@@ -359,7 +368,12 @@ pub fn clone_child(
             current.children_wait_queue().wait_until(cond);
         }
 
-        let child_pid = child_process.pid();
+        // Return the child's PID as seen from the calling (parent's) PID
+        // namespace, so a process in a nested namespace observes a consistent,
+        // namespace-local PID from `fork`/`clone` and from `getpid`.
+        let child_pid = child_process
+            .pid_nr_in(ctx.process.pid_ns())
+            .unwrap_or_else(|| child_process.pid());
         Ok(child_pid)
     }
 }
@@ -567,6 +581,29 @@ fn clone_child_process(
 
     let child_tid = allocate_posix_tid();
 
+    // Determine the child's PID namespace and its namespace-local PID (`vpid`).
+    //
+    // - With `CLONE_NEWPID`, the child becomes the `init` (PID 1) of a fresh
+    //   namespace nested under the parent's.
+    // - Otherwise it joins the parent's namespace. In the initial namespace the
+    //   namespace-local PID is just the global PID; in a nested namespace a new
+    //   namespace-local number is allocated.
+    let (child_pid_ns, child_vpid) = if clone_flags.contains(CloneFlags::CLONE_NEWPID) {
+        let new_pid_ns = process
+            .pid_ns()
+            .new_child(child_user_ns.clone(), posix_thread)?;
+        let vpid = new_pid_ns.alloc_local_pid();
+        (new_pid_ns, vpid)
+    } else {
+        let pid_ns = process.pid_ns().clone();
+        let vpid = if pid_ns.is_init() {
+            child_tid
+        } else {
+            pid_ns.alloc_local_pid()
+        };
+        (pid_ns, vpid)
+    };
+
     let child = {
         let child_vmar_arc = child_vmar.clone_arc();
 
@@ -610,6 +647,8 @@ fn clone_child_process(
 
         create_child_process(
             child_tid,
+            child_pid_ns,
+            child_vpid,
             child_vmar_arc,
             child_resource_limits,
             child_nice,
@@ -829,6 +868,8 @@ fn clone_ns_proxy(
 #[expect(clippy::too_many_arguments)]
 fn create_child_process(
     pid: Pid,
+    pid_ns: Arc<PidNamespace>,
+    vpid: Pid,
     vmar: Arc<Vmar>,
     resource_limits: ResourceLimits,
     nice: Nice,
@@ -839,6 +880,8 @@ fn create_child_process(
 ) -> Arc<Process> {
     let child_proc = Process::new(
         pid,
+        pid_ns,
+        vpid,
         vmar,
         resource_limits,
         nice,

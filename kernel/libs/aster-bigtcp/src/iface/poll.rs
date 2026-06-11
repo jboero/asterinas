@@ -247,7 +247,20 @@ impl<E: Ext> PollContext<'_, E> {
         // Process packets that request to create new connections second.
         if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
             let listener_key = ListenerKey::new(ip_repr.dst_addr(), tcp_repr.dst_port);
-            if let Some(listener) = self.sockets.lookup_listener(&listener_key) {
+            // Fall back to a wildcard listener (bound to the unspecified
+            // address) if no listener matches the exact destination address.
+            let wildcard_key = {
+                let unspecified = match ip_repr.dst_addr() {
+                    IpAddress::Ipv4(_) => IpAddress::Ipv4(core::net::Ipv4Addr::UNSPECIFIED),
+                    IpAddress::Ipv6(_) => IpAddress::Ipv6(core::net::Ipv6Addr::UNSPECIFIED),
+                };
+                ListenerKey::new(unspecified, tcp_repr.dst_port)
+            };
+            if let Some(listener) = self
+                .sockets
+                .lookup_listener(&listener_key)
+                .or_else(|| self.sockets.lookup_listener(&wildcard_key))
+            {
                 let (processed, new_tcp_conn) =
                     listener.process(&mut self.iface, ip_repr, tcp_repr);
 

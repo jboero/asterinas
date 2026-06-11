@@ -325,11 +325,12 @@ impl StreamSocket {
             let accepted_socket = Self::new_accepted(connected_stream, &listener_options);
             (accepted_socket as _, remote_endpoint.into())
         });
-        let iface_to_poll = listen_stream.iface().clone();
+        // A wildcard listener spans every interface in the namespace; poll
+        // them all so pending packets on any of them are processed.
+        listen_stream.poll_ifaces();
 
         drop(state);
         self.pollee.invalidate();
-        iface_to_poll.poll();
 
         accepted
     }
@@ -863,7 +864,7 @@ impl State {
     ///
     /// For listening sockets, socket options are inherited by new connections. However, they are
     /// not updated for connections in the backlog queue.
-    fn set_raw_option<R>(&self, set_option: impl FnOnce(&dyn RawTcpSetOption) -> R) -> Option<R> {
+    fn set_raw_option<R>(&self, set_option: impl Fn(&dyn RawTcpSetOption) -> R) -> Option<R> {
         match self {
             State::Init(_) => None,
             State::Connecting(connecting_stream) => {
@@ -946,9 +947,10 @@ impl Drop for StreamSocket {
             State::Connecting(connecting_stream) => connecting_stream.into_connection(),
             State::Connected(connected_stream) => connected_stream.into_connection(),
             State::Listen(listen_stream) => {
-                let listener = listen_stream.into_listener();
-                listener.close();
-                listener.iface().poll();
+                for listener in listen_stream.into_listeners() {
+                    listener.close();
+                    listener.iface().poll();
+                }
                 return;
             }
         };

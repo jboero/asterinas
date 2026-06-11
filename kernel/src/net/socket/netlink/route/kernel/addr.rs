@@ -4,10 +4,13 @@
 
 use core::num::NonZeroU32;
 
+use aster_bigtcp::wire::{Ipv4Address, Ipv4Cidr};
+
 use super::util::finish_response;
 use crate::{
     net::{
-        iface::{Iface, iter_all_ifaces},
+        iface::Iface,
+        net_ns::{self, NetNamespace},
         socket::netlink::{
             message::{CMsgSegHdr, CSegmentType, GetRequestFlags, SegHdrCommonFlags},
             route::message::{
@@ -28,7 +31,9 @@ pub(super) fn do_get_addr(request_segment: &AddrSegment) -> Result<Vec<RtnlSegme
         return_errno_with_message!(Errno::EOPNOTSUPP, "GETADDR only supports dump requests");
     }
 
-    let mut response_segments: Vec<RtnlSegment> = iter_all_ifaces()
+    let ifaces = NetNamespace::current().all_ifaces();
+    let mut response_segments: Vec<RtnlSegment> = ifaces
+        .iter()
         // GETADDR only supports dump mode, so we're going to report all addresses.
         .filter_map(|iface| iface_to_new_addr(request_segment.header(), iface))
         .map(RtnlSegment::NewAddr)
@@ -37,6 +42,62 @@ pub(super) fn do_get_addr(request_segment: &AddrSegment) -> Result<Vec<RtnlSegme
     finish_response(request_segment.header(), dump_all, &mut response_segments);
 
     Ok(response_segments)
+}
+
+/// Handles an `RTM_NEWADDR` request: assigns an IPv4 address to an interface in
+/// the caller's network namespace.
+///
+/// This is what a CNI plugin (or `ip addr add <ip>/<prefix> dev <iface>`) issues
+/// to give a pod's veth end a routable address. The interface is identified by
+/// `ifa_index`; the address comes from `IFA_LOCAL` (preferred) or `IFA_ADDRESS`,
+/// with the prefix length from the `ifaddrmsg` header.
+pub(super) fn do_new_addr(request_segment: &AddrSegment) -> Result<Vec<RtnlSegment>> {
+    super::util::require_net_admin()?;
+
+    let body = request_segment.body();
+
+    if body.family != CSocketAddrFamily::AF_INET as i32 {
+        return_errno_with_message!(Errno::EOPNOTSUPP, "only IPv4 addresses can be assigned");
+    }
+
+    let index = body
+        .index
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "an interface index is required"))?
+        .get();
+
+    if body.prefix_len > 32 {
+        return_errno_with_message!(Errno::EINVAL, "invalid IPv4 prefix length");
+    }
+
+    // Prefer IFA_LOCAL (the local address of the interface); fall back to
+    // IFA_ADDRESS, which equals IFA_LOCAL for ordinary (non-point-to-point) use.
+    let mut local: Option<[u8; 4]> = None;
+    let mut address: Option<[u8; 4]> = None;
+    for attr in request_segment.attrs() {
+        match attr {
+            AddrAttr::Local(octets) => local = Some(*octets),
+            AddrAttr::Address(octets) => address = Some(*octets),
+            AddrAttr::Label(_) => {}
+        }
+    }
+
+    let octets = local.or(address).ok_or_else(|| {
+        Error::with_message(
+            Errno::EINVAL,
+            "no address attribute (IFA_LOCAL/IFA_ADDRESS) was provided",
+        )
+    })?;
+
+    let cidr = Ipv4Cidr::new(
+        Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]),
+        body.prefix_len,
+    );
+
+    let ns = NetNamespace::current();
+    net_ns::set_iface_addr_v4(&ns, index, cidr)?;
+
+    // No response payload; the kernel socket sends an ACK if one was requested.
+    Ok(Vec::new())
 }
 
 fn iface_to_new_addr(request_header: &CMsgSegHdr, iface: &Arc<Iface>) -> Option<AddrSegment> {

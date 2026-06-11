@@ -52,6 +52,16 @@ trait SubControlStatic: SubControl + Sized + 'static {
     fn read_from(controller: &Controller) -> Arc<SubController<Self>>;
 }
 
+/// Returns the `memory.max` limit (in bytes) that applies to `process`, or
+/// `None` if the process is unrestricted — that is, it is in the root cgroup or
+/// its `memory.max` is unlimited. The root case returning `None` guarantees the
+/// init process and any unconfined process are never restricted.
+pub fn process_memory_max(process: &crate::process::Process) -> Option<u64> {
+    let cgroup_guard = process.cgroup();
+    let cgroup = cgroup_guard.get()?;
+    cgroup.controller().memory_max()
+}
+
 /// The type of a sub-controller in the cgroup subsystem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SubCtrlType {
@@ -475,6 +485,19 @@ impl Controller {
 
     pub(super) fn active_set(&self) -> SubCtrlSet {
         self.active_set.load(Ordering::Relaxed)
+    }
+
+    /// Returns the configured `memory.max` for this cgroup, or `None` if the
+    /// memory sub-controller is inactive or the limit is unlimited.
+    ///
+    /// Used to enforce memory limits at page-fault time. Returning `None` for
+    /// the unlimited case ensures the root cgroup (and any process not subject
+    /// to a finite limit) is never restricted.
+    pub fn memory_max(&self) -> Option<u64> {
+        let guard = self.memory.read();
+        let sub = guard.get();
+        let max = sub.inner.as_ref()?.max_limit();
+        (max != u64::MAX).then_some(max)
     }
 }
 

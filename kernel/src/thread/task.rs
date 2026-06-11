@@ -12,6 +12,7 @@ use super::{Thread, oops};
 use crate::{
     context::current_userspace,
     cpu::LinuxAbi,
+    fs::cgroupfs::{is_cpu_throttled, throttle_cpu_if_needed},
     prelude::*,
     process::{
         posix_thread::{AsPosixThread, FIRST_POSIX_TID, ThreadLocal, ptrace::PtraceStopResult},
@@ -62,7 +63,10 @@ pub fn create_new_user_task(
             task: &current_task,
         };
 
-        let has_kernel_event_fn = || ctx.has_pending();
+        // Return from user space promptly when there is a pending kernel event
+        // or when the process is over its cgroup `cpu.max` budget (so it can be
+        // throttled at a safe point rather than running a full time slice).
+        let has_kernel_event_fn = || ctx.has_pending() || is_cpu_throttled(&ctx.process);
 
         // The startup method is only executed when the first user thread starts up.
         if ctx.posix_thread.tid() == FIRST_POSIX_TID {
@@ -104,6 +108,11 @@ pub fn create_new_user_task(
 
             // Handle signals
             handle_pending_signal(user_ctx, &ctx);
+
+            // Enforce the process's cgroup `cpu.max`: if it is over budget, block
+            // here (a safe point) until the bandwidth period refills. This is a
+            // no-op for the root cgroup and unlimited cgroups.
+            throttle_cpu_if_needed(&ctx.process);
 
             // Handle signals while the thread is stopped
             // FIXME: Currently, we handle all signals when the process is stopped.

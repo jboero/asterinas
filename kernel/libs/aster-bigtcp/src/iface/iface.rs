@@ -92,6 +92,19 @@ impl<E: Ext> dyn Iface<E> {
         self.common().prefix_len()
     }
 
+    /// Sets the interface's IPv4 address and on-link subnet to `cidr`,
+    /// replacing any existing IPv4 address. This is the kernel side of
+    /// assigning an address with `RTM_NEWADDR`.
+    pub fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
+        self.common().set_ipv4_cidr(cidr)
+    }
+
+    /// Returns the IPv4 default-route gateway, if one is configured
+    /// (e.g. for the virtio interface). Used to report routes via netlink.
+    pub fn ipv4_gateway(&self) -> Option<Ipv4Address> {
+        self.common().ipv4_gateway()
+    }
+
     /// Gets the broadcast address of the iface, if any.
     pub fn broadcast_addr(&self) -> Option<Ipv4Address> {
         let cidr = {

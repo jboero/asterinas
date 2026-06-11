@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::{addr::CIfaddrMsg, link::CIfinfoMsg};
+use super::{addr::CIfaddrMsg, link::CIfinfoMsg, route::CRtMsg};
 use crate::prelude::*;
 
 /// `rtgenmsg` in Linux.
@@ -33,6 +33,22 @@ impl From<CRtGenMsg> for CIfaddrMsg {
             flags: 0,
             scope: 0,
             index: 0,
+        }
+    }
+}
+
+impl From<CRtGenMsg> for CRtMsg {
+    fn from(value: CRtGenMsg) -> Self {
+        Self {
+            family: value.family,
+            dst_len: 0,
+            src_len: 0,
+            tos: 0,
+            table: 0,
+            protocol: 0,
+            scope: 0,
+            type_: 0,
+            flags: 0,
         }
     }
 }

@@ -20,12 +20,15 @@ use ostd::{
 
 use super::{RssType, Vmar, interval_set::Interval, util::is_intersected, vmar_impls::RssDelta};
 use crate::{
-    fs::vfs::{
-        inode::Inode,
-        path::{Path, PathResolver},
+    fs::{
+        cgroupfs::process_memory_max,
+        vfs::{
+            inode::Inode,
+            path::{Path, PathResolver},
+        },
     },
     prelude::*,
-    process::LockedHeap,
+    process::{LockedHeap, Process},
     vm::{
         page_cache::{CachePage, Vmo, VmoCommitError},
         perms::VmPerms,
@@ -507,6 +510,16 @@ impl VmMapping {
                         page_flags |= PageFlags::DIRTY;
                     }
                     let map_prop = PageProperty::new_user(page_flags, CachePolicy::Writeback);
+
+                    // Enforce the process's cgroup `memory.max` before committing a
+                    // new anonymous page. Unconfined processes (root cgroup or
+                    // unlimited) are never restricted, so the init process and
+                    // ordinary processes are unaffected.
+                    if matches!(self.rss_type(), RssType::Anon) {
+                        let projected_bytes =
+                            (rss_delta.projected_resident(RssType::Anon) + 1) * PAGE_SIZE;
+                        enforce_cgroup_memory_limit(projected_bytes)?;
+                    }
 
                     cursor.map(frame, map_prop);
                     rss_delta.add(self.rss_type(), 1);
@@ -1006,4 +1019,23 @@ fn duplicate_frame(src: &UFrame) -> Result<Frame<()>> {
     let new_frame = FrameAllocOptions::new().zeroed(false).alloc_frame()?;
     new_frame.writer().write(&mut src.reader());
     Ok(new_frame)
+}
+
+/// Fails with `ENOMEM` if committing another anonymous page would push the
+/// current process's resident anonymous memory past its cgroup `memory.max`.
+///
+/// A `None` limit (root cgroup or unlimited `memory.max`) and the absence of a
+/// current process (kernel-context VMAR setup) are both treated as unrestricted,
+/// so this never affects the init process or ordinary processes.
+fn enforce_cgroup_memory_limit(projected_anon_bytes: usize) -> Result<()> {
+    let Some(process) = Process::current() else {
+        return Ok(());
+    };
+    let Some(max) = process_memory_max(&process) else {
+        return Ok(());
+    };
+    if projected_anon_bytes as u64 > max {
+        return_errno_with_message!(Errno::ENOMEM, "cgroup memory.max limit exceeded");
+    }
+    Ok(())
 }
