@@ -4,7 +4,9 @@ use alloc::sync::Arc;
 
 use smoltcp::wire::{Ipv4Address, Ipv4Cidr, Ipv6Address};
 
-use super::{BindPortConfig, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceType};
+use super::{
+    BindPortConfig, BoundIcmpPort, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceType,
+};
 use crate::{errors::BindError, ext::Ext};
 
 /// A network interface.
@@ -48,6 +50,16 @@ impl<E: Ext> dyn Iface<E> {
     ) -> Result<BoundUdpPort<E>, BindError> {
         let common = self.common();
         common.bind_udp(self.clone(), config)
+    }
+
+    /// Binds an ICMP echo identifier to the iface. The "port" in the config is
+    /// the identifier; an ephemeral one is picked if unspecified.
+    pub fn bind_icmp(
+        self: &Arc<Self>,
+        config: BindPortConfig,
+    ) -> Result<BoundIcmpPort<E>, BindError> {
+        let common = self.common();
+        common.bind_icmp(self.clone(), config)
     }
 
     /// Returns the interface index.

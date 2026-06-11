@@ -31,7 +31,7 @@ use super::{
 use crate::{
     errors::BindError,
     ext::Ext,
-    socket::{TcpListenerBg, UdpSocketBg},
+    socket::{IcmpSocketBg, TcpListenerBg, UdpSocketBg},
     socket_table::SocketTable,
 };
 
@@ -190,6 +190,15 @@ impl<E: Ext> IfaceCommon<E> {
             .map(BoundUdpPort)
     }
 
+    pub(super) fn bind_icmp(
+        &self,
+        iface: Arc<dyn Iface<E>>,
+        config: BindPortConfig,
+    ) -> Result<BoundIcmpPort<E>, BindError> {
+        self.bind(iface, config, PortProtocol::Icmp)
+            .map(BoundIcmpPort)
+    }
+
     fn bind(
         &self,
         iface: Arc<dyn Iface<E>>,
@@ -230,6 +239,17 @@ impl<E: Ext> IfaceCommon<E> {
     pub(crate) fn remove_udp_socket(&self, socket: &Arc<UdpSocketBg<E>>) {
         let mut sockets = self.sockets.lock();
         let removed = sockets.remove_udp_socket(socket);
+        debug_assert!(removed.is_some());
+    }
+
+    pub(crate) fn register_icmp_socket(&self, socket: Arc<IcmpSocketBg<E>>) {
+        let mut sockets = self.sockets.lock();
+        sockets.insert_icmp_socket(socket);
+    }
+
+    pub(crate) fn remove_icmp_socket(&self, socket: &Arc<IcmpSocketBg<E>>) {
+        let mut sockets = self.sockets.lock();
+        let removed = sockets.remove_icmp_socket(socket);
         debug_assert!(removed.is_some());
     }
 }
@@ -348,6 +368,9 @@ impl<E: Ext> Drop for BoundPort<E> {
 pub struct BoundTcpPort<E: Ext>(BoundPort<E>);
 /// A UDP port bound to an iface.
 pub struct BoundUdpPort<E: Ext>(BoundPort<E>);
+/// An ICMP echo identifier bound to an iface (the identifier reuses the port
+/// allocation machinery, as both are unique 16-bit values).
+pub struct BoundIcmpPort<E: Ext>(BoundPort<E>);
 
 impl<E: Ext> Deref for BoundTcpPort<E> {
     type Target = BoundPort<E>;
@@ -356,6 +379,12 @@ impl<E: Ext> Deref for BoundTcpPort<E> {
     }
 }
 impl<E: Ext> Deref for BoundUdpPort<E> {
+    type Target = BoundPort<E>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<E: Ext> Deref for BoundIcmpPort<E> {
     type Target = BoundPort<E>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -373,6 +402,9 @@ struct PortKey {
 enum PortProtocol {
     Tcp,
     Udp,
+    /// ICMP sockets have no ports; the "port" is the ICMP echo identifier,
+    /// which shares the uniqueness requirements of a port.
+    Icmp,
 }
 
 struct PortState {

@@ -4,6 +4,7 @@ use alloc::{boxed::Box, vec};
 
 pub(super) type RawTcpSocket = smoltcp::socket::tcp::Socket<'static>;
 pub type RawUdpSocket = smoltcp::socket::udp::Socket<'static>;
+pub type RawIcmpSocket = smoltcp::socket::icmp::Socket<'static>;
 
 pub(super) fn new_tcp_socket() -> Box<RawTcpSocket> {
     let raw_tcp_socket = {
@@ -30,6 +31,22 @@ pub(super) fn new_udp_socket() -> Box<RawUdpSocket> {
     Box::new(raw_udp_socket)
 }
 
+pub(super) fn new_icmp_socket() -> Box<RawIcmpSocket> {
+    let raw_icmp_socket = {
+        let metadata = smoltcp::socket::icmp::PacketMetadata::EMPTY;
+        let rx_buffer = smoltcp::socket::icmp::PacketBuffer::new(
+            vec![metadata; ICMP_METADATA_LEN],
+            vec![0u8; ICMP_RECV_PAYLOAD_LEN],
+        );
+        let tx_buffer = smoltcp::socket::icmp::PacketBuffer::new(
+            vec![metadata; ICMP_METADATA_LEN],
+            vec![0u8; ICMP_SEND_PAYLOAD_LEN],
+        );
+        RawIcmpSocket::new(rx_buffer, tx_buffer)
+    };
+    Box::new(raw_icmp_socket)
+}
+
 // TCP socket buffer sizes:
 //
 // According to
@@ -50,3 +67,9 @@ pub const TCP_SEND_BUF_LEN: usize = 65536 * 2;
 pub const UDP_SEND_PAYLOAD_LEN: usize = 65536;
 pub const UDP_RECV_PAYLOAD_LEN: usize = 65536;
 const UDP_METADATA_LEN: usize = 256;
+
+// ICMP socket buffer sizes (a ping needs only small packets, but allow a few
+// full-MTU ones to be queued):
+pub const ICMP_SEND_PAYLOAD_LEN: usize = 65536;
+pub const ICMP_RECV_PAYLOAD_LEN: usize = 65536;
+const ICMP_METADATA_LEN: usize = 64;

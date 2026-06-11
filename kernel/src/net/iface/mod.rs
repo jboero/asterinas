@@ -15,6 +15,7 @@ pub(in crate::net) use poll::spawn_poll_thread;
 pub(in crate::net) use veth::new_veth_pair;
 
 pub type Iface = dyn aster_bigtcp::iface::Iface<ext::BigtcpExt>;
+pub type BoundIcmpSocket = aster_bigtcp::socket::IcmpSocket<ext::BigtcpExt>;
 pub type BoundTcpPort = aster_bigtcp::iface::BoundTcpPort<ext::BigtcpExt>;
 pub type BoundUdpPort = aster_bigtcp::iface::BoundUdpPort<ext::BigtcpExt>;
 
