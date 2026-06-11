@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod bridge;
 mod veth;
 
+pub use bridge::{BridgeHub, BridgeLocalDevice, BridgePortDevice};
 pub use smoltcp::phy::{
     Checksum, ChecksumCapabilities, Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken,
 };

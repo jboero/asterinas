@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod bridge;
 mod broadcast;
 mod ext;
 mod init;
@@ -7,6 +8,7 @@ mod poll;
 mod sched;
 mod veth;
 
+pub(in crate::net) use bridge::{bridge_hub_by_index, new_bridge, new_veth_on_bridge};
 pub use broadcast::is_broadcast_endpoint;
 pub(in crate::net) use init::new_loopback;
 pub use init::{init, iter_all_ifaces, loopback_iface, virtio_iface};

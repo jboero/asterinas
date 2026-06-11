@@ -123,6 +123,8 @@ pub enum LinkAttr {
     TxqLen(u32),
     LinkMode(u8),
     ExtMask(RtExtFilter),
+    /// `IFLA_MASTER`: enslave the link to the device with this interface index.
+    Master(u32),
     /// `IFLA_NET_NS_PID`: place the (primary) link in this process's netns.
     NetNsPid(u32),
     /// `IFLA_NET_NS_FD`: place the (primary) link in this fd's netns.
@@ -139,6 +141,7 @@ impl LinkAttr {
             LinkAttr::TxqLen(_) => LinkAttrClass::TXQLEN,
             LinkAttr::LinkMode(_) => LinkAttrClass::LINKMODE,
             LinkAttr::ExtMask(_) => LinkAttrClass::EXT_MASK,
+            LinkAttr::Master(_) => LinkAttrClass::MASTER,
             LinkAttr::NetNsPid(_) => LinkAttrClass::NET_NS_PID,
             LinkAttr::NetNsFd(_) => LinkAttrClass::NET_NS_FD,
             LinkAttr::LinkInfo(_) => LinkAttrClass::LINKINFO,
@@ -158,6 +161,7 @@ impl Attribute for LinkAttr {
             LinkAttr::TxqLen(txq_len) => txq_len.as_bytes(),
             LinkAttr::LinkMode(link_mode) => link_mode.as_bytes(),
             LinkAttr::ExtMask(ext_filter) => ext_filter.as_bytes(),
+            LinkAttr::Master(index) => index.as_bytes(),
             LinkAttr::NetNsPid(pid) => pid.as_bytes(),
             LinkAttr::NetNsFd(fd) => fd.as_bytes(),
             // The kernel never writes `IFLA_LINKINFO` back to user space; this
@@ -202,6 +206,7 @@ impl Attribute for LinkAttr {
                 const { assert!(size_of::<RtExtFilter>() == 4) };
                 Self::ExtMask(reader.read_val_opt::<RtExtFilter>()?.unwrap())
             }
+            (LinkAttrClass::MASTER, 4) => Self::Master(reader.read_val_opt::<u32>()?.unwrap()),
             (LinkAttrClass::NET_NS_PID, 4) => {
                 Self::NetNsPid(reader.read_val_opt::<u32>()?.unwrap())
             }
@@ -214,6 +219,7 @@ impl Attribute for LinkAttr {
                 | LinkAttrClass::TXQLEN
                 | LinkAttrClass::LINKMODE
                 | LinkAttrClass::EXT_MASK
+                | LinkAttrClass::MASTER
                 | LinkAttrClass::NET_NS_PID
                 | LinkAttrClass::NET_NS_FD,
                 _,

@@ -4,12 +4,15 @@
 
 use core::num::NonZero;
 
-use aster_bigtcp::iface::InterfaceType;
+use aster_bigtcp::{
+    iface::InterfaceType,
+    wire::{Ipv4Address, Ipv4Cidr},
+};
 
 use super::util::finish_response;
 use crate::{
     net::{
-        iface::Iface,
+        iface::{Iface, bridge_hub_by_index, new_bridge, new_veth_on_bridge},
         net_ns::{self, NetNamespace},
         socket::netlink::{
             message::{CMsgSegHdr, CSegmentType, GetRequestFlags, SegHdrCommonFlags},
@@ -125,22 +128,34 @@ fn validate_dumplink_request(body: &LinkSegmentBody) -> Result<()> {
 
 /// Handles an `RTM_NEWLINK` request.
 ///
-/// Currently this supports creating a **veth pair**, which is what a CNI plugin
-/// issues to wire a pod's network namespace to the host:
+/// Currently this supports creating two link kinds:
+///
+/// - A **bridge** (`ip link add br0 type bridge`). The bridge is created without
+///   an address; like veth ends, it gets its IP later via `RTM_NEWADDR`.
+/// - A **veth pair**, which is what a CNI plugin issues to wire a pod's network
+///   namespace to the host:
 ///
 /// ```text
 /// ip link add <name> type veth peer name <peer> netns <pid>
+/// ip link add <name> type veth peer name <peer> netns <pid> master <br-ifindex>
 /// ```
 ///
 /// The `<name>` end is placed in the caller's network namespace (or the namespace
 /// of `IFLA_NET_NS_PID` if present at the top level); the `<peer>` end is placed
 /// in the namespace named by `VETH_INFO_PEER`'s `IFLA_NET_NS_PID` (defaulting to
 /// the caller's namespace). Addresses are configured separately via `RTM_NEWADDR`.
+///
+/// If `IFLA_MASTER` is present (it carries the bridge's interface _index_, not
+/// its name), the `<name>` end is created directly as a port of that bridge
+/// instead of as a standalone iface, so only the `<peer>` end is visible to
+/// `RTM_GETLINK`. Attaching an existing link to a master via `RTM_SETLINK` is
+/// not yet supported; the master can only be set at creation time.
 pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegment>> {
     super::util::require_net_admin()?;
 
     let mut primary_name: Option<&str> = None;
     let mut primary_ns_pid: Option<u32> = None;
+    let mut master_index: Option<u32> = None;
     let mut kind: Option<&str> = None;
     let mut peer = None;
 
@@ -148,6 +163,7 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
         match attr {
             LinkAttr::Name(name) => primary_name = name.to_str().ok(),
             LinkAttr::NetNsPid(pid) => primary_ns_pid = Some(*pid),
+            LinkAttr::Master(index) => master_index = Some(*index),
             LinkAttr::LinkInfo(info) => {
                 kind = info.kind.as_ref().and_then(|k| k.to_str().ok());
                 peer = info.veth_peer.as_ref();
@@ -162,13 +178,25 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
             "RTM_NEWLINK without IFLA_LINKINFO is not supported (only typed links can be created)",
         )
     })?;
-    if kind != "veth" {
-        return_errno_with_message!(Errno::EOPNOTSUPP, "only veth links can be created");
+
+    if kind != "bridge" && kind != "veth" {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "only bridge and veth links can be created"
+        );
     }
 
     let primary_name = primary_name.ok_or_else(|| {
         Error::with_message(Errno::EINVAL, "a link name (IFLA_IFNAME) is required")
     })?;
+
+    if kind == "bridge" {
+        let (iface, _hub) = new_bridge(primary_name.to_string());
+        NetNamespace::current().add_iface(iface);
+        // No response payload; the kernel socket sends an ACK if one was requested.
+        return Ok(Vec::new());
+    }
+
     let peer = peer.ok_or_else(|| {
         Error::with_message(Errno::EINVAL, "a veth requires a peer (VETH_INFO_PEER)")
     })?;
@@ -179,11 +207,6 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
         .ok_or_else(|| Error::with_message(Errno::EINVAL, "the veth peer name is required"))?;
 
     let current_ns = NetNamespace::current();
-
-    let primary_ns = match primary_ns_pid {
-        Some(pid) => net_ns::net_ns_of_pid(pid)?,
-        None => current_ns.clone(),
-    };
 
     let peer_ns = if let Some(pid) = peer.net_ns_pid {
         net_ns::net_ns_of_pid(pid)?
@@ -196,6 +219,29 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
         );
     } else {
         current_ns.clone()
+    };
+
+    if let Some(index) = master_index {
+        let hub = bridge_hub_by_index(index)
+            .ok_or_else(|| Error::with_message(Errno::ENODEV, "no such bridge"))?;
+        // The `<name>` end becomes a port of the bridge hub rather than a
+        // standalone iface, so RTM_GETLINK does not list it (v1; matches
+        // creation-time-master CNI flows). The pod end's address is configured
+        // separately via RTM_NEWADDR.
+        let pod_iface = new_veth_on_bridge(
+            &hub,
+            peer_name.to_string(),
+            Ipv4Cidr::new(Ipv4Address::new(0, 0, 0, 0), 0),
+        );
+        peer_ns.add_iface(pod_iface);
+
+        // No response payload; the kernel socket sends an ACK if one was requested.
+        return Ok(Vec::new());
+    }
+
+    let primary_ns = match primary_ns_pid {
+        Some(pid) => net_ns::net_ns_of_pid(pid)?,
+        None => current_ns.clone(),
     };
 
     net_ns::create_veth_pair(

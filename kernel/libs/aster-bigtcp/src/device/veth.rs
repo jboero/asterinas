@@ -27,7 +27,9 @@ use spin::once::Once;
 pub type VethNotifier = Box<dyn Fn() + Send + Sync>;
 
 /// The maximum transmission unit of a veth interface.
-const VETH_MTU: usize = 1500;
+///
+/// Also reused by [`super::bridge`], whose ports are veth-like links.
+pub(super) const VETH_MTU: usize = 1500;
 
 /// Identifies one of the two ends of a veth pair.
 #[derive(Clone, Copy, PartialEq, Eq)]

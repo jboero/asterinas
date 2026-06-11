@@ -84,7 +84,9 @@ pub(in crate::net) fn new_veth_pair(
 }
 
 /// Requests that the interface referenced by `weak` poll as soon as possible.
-fn schedule_poll(weak: &alloc::sync::Weak<Iface>) {
+///
+/// Also used by [`super::bridge`] to wire hub notifiers to interfaces.
+pub(super) fn schedule_poll(weak: &alloc::sync::Weak<Iface>) {
     use aster_bigtcp::iface::ScheduleNextPoll;
 
     if let Some(iface) = weak.upgrade() {
