@@ -105,6 +105,12 @@ impl<E: Ext> dyn Iface<E> {
         self.common().ipv4_gateway()
     }
 
+    /// Adds an IPv4 route via `gateway` (prefix length 0 = default route).
+    /// This is the kernel side of programming a route with `RTM_NEWROUTE`.
+    pub fn add_ipv4_route(&self, cidr: Ipv4Cidr, gateway: Ipv4Address) {
+        self.common().add_ipv4_route(cidr, gateway)
+    }
+
     /// Gets the broadcast address of the iface, if any.
     pub fn broadcast_addr(&self) -> Option<Ipv4Address> {
         let cidr = {

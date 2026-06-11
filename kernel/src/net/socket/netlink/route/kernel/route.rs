@@ -2,10 +2,12 @@
 
 //! Handle route-related requests.
 
+use aster_bigtcp::wire::{Ipv4Address, Ipv4Cidr};
+
 use super::util::finish_response;
 use crate::{
     net::{
-        net_ns::NetNamespace,
+        net_ns::{self, NetNamespace},
         socket::netlink::{
             message::{CMsgSegHdr, CSegmentType, GetRequestFlags, SegHdrCommonFlags},
             route::message::{RouteAttr, RouteSegment, RouteSegmentBody, RtnlSegment},
@@ -79,6 +81,54 @@ pub(super) fn do_get_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSeg
     finish_response(request_segment.header(), dump_all, &mut response_segments);
 
     Ok(response_segments)
+}
+
+/// Handles an `RTM_NEWROUTE` request: programs an IPv4 route in the calling
+/// thread's network namespace. This is what a CNI plugin (or `ip route add
+/// <dst>/<prefix> via <gateway>`) issues to give a pod a default route to its
+/// host veth end. Requires `CAP_NET_ADMIN`.
+pub(super) fn do_new_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSegment>> {
+    super::util::require_net_admin()?;
+
+    let body = request_segment.body();
+    if body.family != AF_INET {
+        return_errno_with_message!(Errno::EOPNOTSUPP, "only IPv4 routes can be programmed");
+    }
+    if body.dst_len > 32 {
+        return_errno_with_message!(Errno::EINVAL, "invalid route prefix length");
+    }
+
+    let mut dst: Option<[u8; 4]> = None;
+    let mut gateway: Option<[u8; 4]> = None;
+    let mut oif: Option<u32> = None;
+    for attr in request_segment.attrs() {
+        match attr {
+            RouteAttr::Dst(octets) => dst = Some(*octets),
+            RouteAttr::Gateway(octets) => gateway = Some(*octets),
+            RouteAttr::Oif(index) => oif = Some(*index),
+            _ => {}
+        }
+    }
+
+    // No RTA_DST means the default route (0.0.0.0/0), which is how
+    // `ip route add default via ...` is encoded.
+    let dst = dst.unwrap_or([0, 0, 0, 0]);
+    let cidr = Ipv4Cidr::new(
+        Ipv4Address::new(dst[0], dst[1], dst[2], dst[3]),
+        body.dst_len,
+    );
+
+    let Some(gw) = gateway else {
+        // A gateway-less ("dev") route to an on-link subnet needs no entry:
+        // smoltcp reaches an interface's own subnet directly. Acknowledge it.
+        return Ok(Vec::new());
+    };
+    let gateway = Ipv4Address::new(gw[0], gw[1], gw[2], gw[3]);
+
+    net_ns::add_iface_route_v4(&NetNamespace::current(), oif, cidr, gateway)?;
+
+    // No response payload; the kernel socket sends an ACK if one was requested.
+    Ok(Vec::new())
 }
 
 fn new_route_header(request_header: &CMsgSegHdr) -> CMsgSegHdr {

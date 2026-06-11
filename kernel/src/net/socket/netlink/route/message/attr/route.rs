@@ -52,9 +52,23 @@ impl Attribute for RouteAttr {
     where
         Self: Sized,
     {
-        // GETROUTE is currently dump-only; request attributes (filters) are
-        // ignored, matching how GETADDR requests are handled.
-        reader.skip_some(header.payload_len());
-        Ok(ContinueRead::Skipped)
+        let payload_len = header.payload_len();
+
+        // Parse the attributes an `RTM_NEWROUTE` carries (destination, gateway,
+        // output interface). GETROUTE dump requests carry none, so this is a
+        // no-op there.
+        let res = match (header.type_(), payload_len) {
+            (RTA_DST, 4) => Self::Dst(reader.read_val_opt::<[u8; 4]>()?.unwrap()),
+            (RTA_GATEWAY, 4) => Self::Gateway(reader.read_val_opt::<[u8; 4]>()?.unwrap()),
+            (RTA_PREFSRC, 4) => Self::PrefSrc(reader.read_val_opt::<[u8; 4]>()?.unwrap()),
+            (RTA_OIF, 4) => Self::Oif(reader.read_val_opt::<u32>()?.unwrap()),
+            (RTA_TABLE, 4) => Self::Table(reader.read_val_opt::<u32>()?.unwrap()),
+            _ => {
+                reader.skip_some(payload_len);
+                return Ok(ContinueRead::Skipped);
+            }
+        };
+
+        Ok(ContinueRead::Parsed(res))
     }
 }

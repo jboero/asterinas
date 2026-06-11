@@ -137,6 +137,14 @@ impl<E: Ext> IfaceCommon<E> {
         self.interface.lock().ipv4_gateway()
     }
 
+    pub(super) fn add_ipv4_route(
+        &self,
+        cidr: smoltcp::wire::Ipv4Cidr,
+        gateway: smoltcp::wire::Ipv4Address,
+    ) {
+        self.interface.lock().add_ipv4_route(cidr, gateway);
+    }
+
     pub(super) fn sched_poll(&self) -> &E::ScheduleNextPoll {
         &self.sched_poll
     }

@@ -264,6 +264,37 @@ pub fn set_iface_addr_v4(ns: &Arc<NetNamespace>, index: u32, cidr: Ipv4Cidr) -> 
     Ok(())
 }
 
+/// Adds an IPv4 route `cidr via gateway` in `ns`. This is the kernel side of
+/// `RTM_NEWROUTE` — what a CNI plugin issues to program a pod's default route
+/// (`ip route add default via <host veth>`). The output interface is chosen by
+/// `oif` index when given, otherwise by which interface's subnet contains the
+/// gateway (the gateway must be directly reachable).
+pub fn add_iface_route_v4(
+    ns: &Arc<NetNamespace>,
+    oif: Option<u32>,
+    cidr: Ipv4Cidr,
+    gateway: Ipv4Address,
+) -> Result<()> {
+    let iface = match oif {
+        Some(index) => ns.find_iface_by_index(index),
+        None => ns.with_ifaces(|ifaces| {
+            ifaces
+                .iter()
+                .find(|iface| subnet_contains(iface, gateway))
+                .cloned()
+        }),
+    }
+    .ok_or_else(|| {
+        Error::with_message(
+            Errno::ENETUNREACH,
+            "no interface can reach the route gateway",
+        )
+    })?;
+
+    iface.add_ipv4_route(cidr, gateway);
+    Ok(())
+}
+
 impl NsCommonOps for NetNamespace {
     const TYPE: NsType = NsType::Net;
 

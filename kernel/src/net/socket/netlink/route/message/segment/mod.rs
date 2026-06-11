@@ -115,6 +115,9 @@ impl ProtocolSegment for RtnlSegment {
             Ok(CSegmentType::GETROUTE) => {
                 RouteSegment::read_from(&header, reader)?.map(RtnlSegment::GetRoute)
             }
+            Ok(CSegmentType::NEWROUTE) => {
+                RouteSegment::read_from(&header, reader)?.map(RtnlSegment::NewRoute)
+            }
             _ => {
                 let payload_len = header.calc_payload_len_with_padding(reader)?;
                 reader.skip_some(payload_len);

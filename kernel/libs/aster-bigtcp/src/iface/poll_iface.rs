@@ -74,6 +74,30 @@ impl<E: Ext> PollableIface<E> {
         gateway
     }
 
+    /// Adds an IPv4 route via `gateway`. A `cidr` with prefix length 0 installs
+    /// the default route (replacing any existing one); otherwise a route to that
+    /// network via the gateway is appended. This is the kernel side of
+    /// `RTM_NEWROUTE` for `... via <gateway>`.
+    pub(super) fn add_ipv4_route(
+        &mut self,
+        cidr: smoltcp::wire::Ipv4Cidr,
+        gateway: smoltcp::wire::Ipv4Address,
+    ) {
+        let routes = self.interface.routes_mut();
+        if cidr.prefix_len() == 0 {
+            let _ = routes.add_default_ipv4_route(gateway);
+        } else {
+            routes.update(|table| {
+                let _ = table.push(smoltcp::iface::Route {
+                    cidr: smoltcp::wire::IpCidr::Ipv4(cidr),
+                    via_router: smoltcp::wire::IpAddress::Ipv4(gateway),
+                    preferred_until: None,
+                    expires_at: None,
+                });
+            });
+        }
+    }
+
     /// Replaces the interface's IPv4 address (and on-link subnet) with `cidr`.
     ///
     /// Any existing IPv4 address is removed; an IPv6 address, if present, is kept.
