@@ -14,6 +14,7 @@ macro_rules! import_generic_syscall_entries {
             accept::{sys_accept, sys_accept4},
             access::{sys_faccessat, sys_faccessat2},
             bind::sys_bind,
+            bpf::sys_bpf,
             brk::sys_brk,
             capget::sys_capget,
             capset::sys_capset,
@@ -395,6 +396,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_RENAMEAT2 = 276              => sys_renameat2(args[..5]);
             SYS_SECCOMP = 277                => sys_seccomp(args[..3]);
             SYS_GETRANDOM = 278              => sys_getrandom(args[..3]);
+            SYS_BPF = 280                    => sys_bpf(args[..3]);
             SYS_MEMFD_CREATE = 279           => sys_memfd_create(args[..2]);
             SYS_EXECVEAT = 281               => sys_execveat(args[..5], &mut user_ctx);
             SYS_PREADV2 = 286                => sys_preadv2(args[..6]);
