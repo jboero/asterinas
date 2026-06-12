@@ -3,7 +3,7 @@
 mod bridge;
 mod veth;
 
-pub use bridge::{BridgeHub, BridgeLocalDevice, BridgePortDevice};
+pub use bridge::{BridgeHub, BridgeLocalDevice, BridgePortDevice, set_router};
 pub use smoltcp::phy::{
     Checksum, ChecksumCapabilities, Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken,
 };

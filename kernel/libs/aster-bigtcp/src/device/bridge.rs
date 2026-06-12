@@ -24,7 +24,7 @@
 //! interface draining that queue. The notifiers are set by the kernel after the
 //! interfaces are built.
 
-use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use ostd::sync::SpinLock;
@@ -131,10 +131,29 @@ fn is_flood_dst(dst: [u8; 4]) -> bool {
     dst == [255, 255, 255, 255] || dst[0] & 0xF0 == 0xE0
 }
 
+/// An L3 router consulted when a hub cannot deliver a unicast frame to one of
+/// its own ports. It is given the *source* hub's id and the frame, and returns
+/// `true` if it forwarded the frame elsewhere (e.g. to a sibling bridge whose
+/// subnet owns the destination), `false` if the hub should fall back to its own
+/// local stack. There is a single global router, installed by the kernel.
+type Router = dyn Fn(u32, &[u8]) -> bool + Send + Sync;
+
+static ROUTER: Once<Box<Router>> = Once::new();
+
+/// Installs the global inter-bridge router. Idempotent: only the first call
+/// takes effect.
+pub fn set_router(router: Box<Router>) {
+    ROUTER.call_once(|| router);
+}
+
 /// An L3 forwarding hub between member ports and a local stack attachment.
 ///
 /// See the [module documentation](self) for the forwarding model.
 pub struct BridgeHub {
+    /// This hub's id (the interface index of the bridge's own interface), set
+    /// once after creation. Passed to the [`Router`] so it never routes a frame
+    /// back to the bridge it came from.
+    id: Once<u32>,
     /// Member ports. Ports are append-only in v1: indices handed out by
     /// [`Self::add_port`] stay valid for the lifetime of the hub.
     ports: SpinLock<Vec<BridgePortInner>>,
@@ -150,11 +169,24 @@ impl BridgeHub {
     /// Creates a new hub with no ports.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            id: Once::new(),
             ports: SpinLock::new(Vec::new()),
             local_rx: SpinLock::new(VecDeque::new()),
             local_notify: Once::new(),
             local_device_taken: AtomicBool::new(false),
         })
+    }
+
+    /// Sets this hub's id (the bridge interface's index). Set once, right after
+    /// the bridge interface is created.
+    pub fn set_id(&self, id: u32) {
+        self.id.call_once(|| id);
+    }
+
+    /// Returns this hub's id, or 0 if it has not been set (which never routes,
+    /// since interface index 0 is not a bridge).
+    fn id(&self) -> u32 {
+        self.id.get().copied().unwrap_or(0)
     }
 
     /// Returns the device backing the bridge's own interface.
@@ -265,9 +297,17 @@ impl BridgeHub {
             }
         }
 
-        // Unknown unicast from a port goes to the local stack: the bridge
-        // interface owns the gateway address and routes everything off-bridge.
+        // Unknown unicast from a port: first offer it to the L3 router, which
+        // forwards it to a sibling bridge if one owns the destination subnet
+        // (inter-subnet pod routing). If no router handles it, it goes to the
+        // bridge's own local stack — which owns the gateway address and routes
+        // everything else off-bridge.
         drop(ports);
+        if let Some(router) = ROUTER.get()
+            && router(self.id(), &frame)
+        {
+            return;
+        }
         self.deliver_to_local(frame);
     }
 
