@@ -140,13 +140,15 @@ pub fn sys_prctl(
                     "installing a DNAT rule requires CAP_NET_ADMIN"
                 );
             }
-            aster_bigtcp::nat::nat_table().add_dnat(aster_bigtcp::nat::DnatRule {
-                vip: vip.to_be_bytes(),
-                vport: (ports >> 16) as u16,
-                proto: proto as u8,
-                backend: backend.to_be_bytes(),
-                bport: (ports & 0xffff) as u16,
-            });
+            // Each call adds one backend endpoint; repeated calls for the same
+            // VIP build up its backend set (load-balanced Service endpoints).
+            aster_bigtcp::nat::nat_table().add_dnat(
+                vip.to_be_bytes(),
+                (ports >> 16) as u16,
+                proto as u8,
+                backend.to_be_bytes(),
+                (ports & 0xffff) as u16,
+            );
         }
     }
 

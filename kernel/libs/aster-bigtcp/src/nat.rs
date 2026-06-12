@@ -9,6 +9,11 @@
 //! tracking table remembers each translated flow so the reverse rewrite can be
 //! applied to replies.
 //!
+//! A VIP may have several backends (Kubernetes endpoints); a new flow is
+//! pinned to one of them by hashing the client's address and port, and the
+//! choice is remembered in the conntrack entry so every later packet of that
+//! flow reaches the same backend (per-connection stickiness, like kube-proxy).
+//!
 //! The engine operates on raw IPv4 frame bytes and is consulted from the bridge
 //! forwarding path (see [`crate::device::BridgeHub`]). It is intentionally
 //! small: a global rule/conntrack table, IPv4 + UDP/TCP only, no general
@@ -16,7 +21,7 @@
 //! programs rules is, for now, an `astrokube` `prctl` extension; the
 //! `nftables`-compatible netlink surface is future work.
 
-use alloc::{collections::vec_deque::VecDeque, vec::Vec};
+use alloc::{collections::vec_deque::VecDeque, vec, vec::Vec};
 
 use ostd::sync::SpinLock;
 use spin::Once;
@@ -25,14 +30,24 @@ use spin::Once;
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 
-/// A destination-NAT rule: `vip:vport/proto` → `backend:bport`.
-#[derive(Clone, Copy, Debug)]
-pub struct DnatRule {
-    pub vip: [u8; 4],
-    pub vport: u16,
-    pub proto: u8,
-    pub backend: [u8; 4],
-    pub bport: u16,
+/// One backend endpoint of a Service: an address and port to DNAT toward.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Backend {
+    addr: [u8; 4],
+    port: u16,
+}
+
+/// A destination-NAT rule: `vip:vport/proto` → one of `backends`.
+///
+/// A rule carries a *set* of backends (Service endpoints). Which one a given
+/// flow uses is chosen once, when the flow is first seen, and pinned in the
+/// conntrack entry thereafter.
+#[derive(Clone, Debug)]
+struct DnatRule {
+    vip: [u8; 4],
+    vport: u16,
+    proto: u8,
+    backends: Vec<Backend>,
 }
 
 /// A tracked, DNAT-translated flow, used to reverse-translate replies.
@@ -66,16 +81,29 @@ impl NatTable {
         }
     }
 
-    /// Installs (or replaces) a DNAT rule.
-    pub fn add_dnat(&self, rule: DnatRule) {
+    /// Adds a backend endpoint to the `vip:vport/proto` Service, creating the
+    /// rule if it does not exist yet. Calling this repeatedly for one VIP builds
+    /// up its backend set; a duplicate backend is ignored.
+    pub fn add_dnat(&self, vip: [u8; 4], vport: u16, proto: u8, backend: [u8; 4], bport: u16) {
+        let endpoint = Backend {
+            addr: backend,
+            port: bport,
+        };
         let mut rules = self.rules.lock();
         if let Some(existing) = rules
             .iter_mut()
-            .find(|r| r.vip == rule.vip && r.vport == rule.vport && r.proto == rule.proto)
+            .find(|r| r.vip == vip && r.vport == vport && r.proto == proto)
         {
-            *existing = rule;
+            if !existing.backends.contains(&endpoint) {
+                existing.backends.push(endpoint);
+            }
         } else {
-            rules.push(rule);
+            rules.push(DnatRule {
+                vip,
+                vport,
+                proto,
+                backends: vec![endpoint],
+            });
         }
     }
 
@@ -93,7 +121,7 @@ impl NatTable {
 
         // Reverse path: a reply from a known backend → rewrite source to the VIP.
         {
-            let mut ct = self.conntrack.lock();
+            let ct = self.conntrack.lock();
             if let Some(entry) = ct.iter().find(|e| {
                 e.proto == p.proto
                     && e.backend == p.src
@@ -108,29 +136,39 @@ impl NatTable {
             }
         }
 
-        // Forward path: a packet to a VIP → rewrite destination to the backend
-        // and remember the flow.
-        let rule = {
+        // Forward path: a packet to a VIP → pick a backend, rewrite the
+        // destination to it, and remember the flow.
+        let backend = {
             let rules = self.rules.lock();
             rules
                 .iter()
                 .find(|r| r.proto == p.proto && r.vip == p.dst && r.vport == p.dport)
-                .copied()
+                .and_then(|rule| {
+                    // Pin this flow to one backend by hashing the client. The
+                    // same client address+port always maps to the same backend,
+                    // so a flow stays sticky even before its conntrack exists.
+                    let n = rule.backends.len();
+                    if n == 0 {
+                        return None;
+                    }
+                    let idx = (flow_hash(p.src, p.sport) as usize) % n;
+                    Some(rule.backends[idx])
+                })
         };
-        let Some(rule) = rule else {
+        let Some(backend) = backend else {
             return false;
         };
 
         self.record(Conntrack {
             proto: p.proto,
-            backend: rule.backend,
-            bport: rule.bport,
+            backend: backend.addr,
+            bport: backend.port,
             client: p.src,
             cport: p.sport,
-            vip: rule.vip,
-            vport: rule.vport,
+            vip: p.dst,
+            vport: p.dport,
         });
-        rewrite_dst(frame, &p, rule.backend, rule.bport);
+        rewrite_dst(frame, &p, backend.addr, backend.port);
         true
     }
 
@@ -274,4 +312,18 @@ fn fold(mut sum: u32) -> u16 {
 
 fn checksum(data: &[u8]) -> u16 {
     fold(sum_words(data))
+}
+
+/// Hashes a client `addr:port` to pick a backend. A small FNV-1a-style mix is
+/// enough to spread distinct client ports across the backend set while keeping
+/// any single flow pinned to one backend.
+fn flow_hash(addr: [u8; 4], port: u16) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in addr {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    for b in port.to_be_bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    h
 }

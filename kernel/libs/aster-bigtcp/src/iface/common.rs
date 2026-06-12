@@ -18,7 +18,7 @@ use ostd::sync::{SpinLock, SpinLockGuard};
 use smoltcp::{
     iface::{Context, packet::Packet},
     phy::Device,
-    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Packet},
+    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv4Packet, Ipv6Address, Ipv6Packet},
 };
 
 use super::{
@@ -129,7 +129,7 @@ impl<E: Ext> IfaceCommon<E> {
         self.interface.lock().prefix_len()
     }
 
-    pub(super) fn set_ipv4_cidr(&self, cidr: smoltcp::wire::Ipv4Cidr) {
+    pub(super) fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
         self.interface.lock().set_ipv4_cidr(cidr);
     }
 
@@ -137,11 +137,7 @@ impl<E: Ext> IfaceCommon<E> {
         self.interface.lock().ipv4_gateway()
     }
 
-    pub(super) fn add_ipv4_route(
-        &self,
-        cidr: smoltcp::wire::Ipv4Cidr,
-        gateway: smoltcp::wire::Ipv4Address,
-    ) {
+    pub(super) fn add_ipv4_route(&self, cidr: Ipv4Cidr, gateway: Ipv4Address) {
         self.interface.lock().add_ipv4_route(cidr, gateway);
     }
 
