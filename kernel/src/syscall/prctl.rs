@@ -121,6 +121,12 @@ pub fn sys_prctl(
             ctx.user_space()
                 .write_val(write_addr, &(process.is_child_subreaper() as u32))?;
         }
+        PrctlCmd::PR_SET_NO_NEW_PRIVS => {
+            ctx.posix_thread.set_no_new_privs();
+        }
+        PrctlCmd::PR_GET_NO_NEW_PRIVS => {
+            return Ok(SyscallReturn::Return(ctx.posix_thread.no_new_privs() as _));
+        }
         PrctlCmd::PR_ASTROKUBE_DNAT {
             vip,
             backend,
@@ -187,6 +193,8 @@ const PR_SET_TIMERSLACK: i32 = 29;
 const PR_GET_TIMERSLACK: i32 = 30;
 const PR_SET_CHILD_SUBREAPER: i32 = 36;
 const PR_GET_CHILD_SUBREAPER: i32 = 37;
+const PR_SET_NO_NEW_PRIVS: i32 = 38;
+const PR_GET_NO_NEW_PRIVS: i32 = 39;
 
 /// A non-Linux astrokube extension: install a Service (ClusterIP) DNAT rule.
 /// `arg2`/`arg3` are the VIP and backend IPv4 addresses as big-endian `u32`,
@@ -219,6 +227,8 @@ pub enum PrctlCmd {
     PR_GET_TIMERSLACK,
     PR_SET_CHILD_SUBREAPER(bool),
     PR_GET_CHILD_SUBREAPER(Vaddr),
+    PR_SET_NO_NEW_PRIVS,
+    PR_GET_NO_NEW_PRIVS,
     PR_ASTROKUBE_DNAT {
         vip: u32,
         backend: u32,
@@ -262,6 +272,15 @@ impl PrctlCmd {
             PR_GET_TIMERSLACK => Ok(PrctlCmd::PR_GET_TIMERSLACK),
             PR_SET_CHILD_SUBREAPER => Ok(PrctlCmd::PR_SET_CHILD_SUBREAPER(arg2 > 0)),
             PR_GET_CHILD_SUBREAPER => Ok(PrctlCmd::PR_GET_CHILD_SUBREAPER(arg2 as _)),
+            PR_SET_NO_NEW_PRIVS => {
+                // Linux only allows turning the flag on (arg2 must be 1, and
+                // arg3..arg5 must be 0).
+                if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                    return_errno_with_message!(Errno::EINVAL, "invalid PR_SET_NO_NEW_PRIVS args");
+                }
+                Ok(PrctlCmd::PR_SET_NO_NEW_PRIVS)
+            }
+            PR_GET_NO_NEW_PRIVS => Ok(PrctlCmd::PR_GET_NO_NEW_PRIVS),
             PR_ASTROKUBE_DNAT => Ok(PrctlCmd::PR_ASTROKUBE_DNAT {
                 vip: arg2 as u32,
                 backend: arg3 as u32,

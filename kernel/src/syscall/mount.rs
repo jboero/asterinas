@@ -152,7 +152,14 @@ fn do_change_type(target_path: Path, flags: MountFlags, ctx: &Context) -> Result
         );
     }
 
-    if flags.contains(MountFlags::MS_PRIVATE) {
+    // Asterinas only models the `Private` propagation type. The other types
+    // (`MS_SHARED`/`MS_SLAVE`/`MS_UNBINDABLE`) are accepted but treated as
+    // `Private`: in a single mount namespace — the case container runtimes set
+    // up — the propagation type does not change reachability, and runc's
+    // `pivot_root` sequence issues `mount(MS_SLAVE|MS_REC)` on the old root,
+    // which must succeed for the container to start. Real multi-namespace
+    // propagation semantics are future work.
+    if !propagation_flags.is_empty() {
         let recursive = flags.contains(MountFlags::MS_REC);
         target_path.set_mount_propagation(MountPropType::Private, recursive, ctx)?;
         Ok(())

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use aster_rights::{ReadDupOp, ReadOp, ReadWriteOp};
 use ostd::{
@@ -107,6 +107,11 @@ pub struct PosixThread {
 
     /// The personality value for this thread.
     personality: AtomicU32,
+
+    /// The `no_new_privs` attribute (set via `prctl(PR_SET_NO_NEW_PRIVS)`). Once
+    /// set it cannot be cleared, and an `execve` may not grant new privileges.
+    /// Container runtimes (runc) set this before exec'ing the entrypoint.
+    no_new_privs: AtomicBool,
 }
 
 impl PosixThread {
@@ -329,6 +334,16 @@ impl PosixThread {
     }
 
     /// Resets the current timer slack to the default value.
+    /// Returns whether `no_new_privs` is set for this thread.
+    pub fn no_new_privs(&self) -> bool {
+        self.no_new_privs.load(Ordering::Relaxed)
+    }
+
+    /// Sets `no_new_privs` for this thread. In Linux it can only be turned on.
+    pub fn set_no_new_privs(&self) {
+        self.no_new_privs.store(true, Ordering::Relaxed);
+    }
+
     pub fn reset_timer_slack_to_default(&self) {
         let default = self.default_timer_slack_ns.load(Ordering::Relaxed);
         self.timer_slack_ns.store(default, Ordering::Relaxed);
