@@ -67,10 +67,29 @@ struct Conntrack {
 
 const MAX_CONNTRACK: usize = 512;
 
+/// A masqueraded (source-NAT) flow.
+///
+/// When a pod's packet egresses toward a network the cluster does not own, its
+/// source address is rewritten to the egress interface's address (`masq_addr`),
+/// so the outside host replies to the node rather than to an unroutable pod
+/// address. The port is left unchanged, so `sport` doubles as the demux key for
+/// replies. This entry lets the reply (`remote:rport → masq_addr:sport`) have
+/// its destination rewritten back to the original pod (`orig_src:sport`).
+#[derive(Clone, Copy)]
+struct Masq {
+    proto: u8,
+    orig_src: [u8; 4],
+    sport: u16,
+    masq_addr: [u8; 4],
+    remote: [u8; 4],
+    rport: u16,
+}
+
 /// The global NAT table.
 pub struct NatTable {
     rules: SpinLock<Vec<DnatRule>>,
     conntrack: SpinLock<VecDeque<Conntrack>>,
+    masq: SpinLock<VecDeque<Masq>>,
 }
 
 impl NatTable {
@@ -78,6 +97,7 @@ impl NatTable {
         Self {
             rules: SpinLock::new(Vec::new()),
             conntrack: SpinLock::new(VecDeque::new()),
+            masq: SpinLock::new(VecDeque::new()),
         }
     }
 
@@ -118,6 +138,25 @@ impl NatTable {
         let Some(p) = Packet::parse(frame) else {
             return false;
         };
+
+        // Masquerade reverse path: a reply to a masqueraded flow
+        // (`remote:rport → masq_addr:sport`) → rewrite destination back to the
+        // original pod address.
+        {
+            let masq = self.masq.lock();
+            if let Some(entry) = masq.iter().find(|e| {
+                e.proto == p.proto
+                    && e.masq_addr == p.dst
+                    && e.sport == p.dport
+                    && e.remote == p.src
+                    && e.rport == p.sport
+            }) {
+                let orig_src = entry.orig_src;
+                drop(masq);
+                rewrite_dst_addr(frame, &p, orig_src);
+                return true;
+            }
+        }
 
         // Reverse path: a reply from a known backend → rewrite source to the VIP.
         {
@@ -170,6 +209,52 @@ impl NatTable {
         });
         rewrite_dst(frame, &p, backend.addr, backend.port);
         true
+    }
+
+    /// Whether the engine has any state, so the datapath knows it must consult
+    /// [`Self::apply`]. (A masquerade reply is reversed there.)
+    pub fn is_active(&self) -> bool {
+        !self.rules.lock().is_empty() || !self.masq.lock().is_empty()
+    }
+
+    /// Masquerades an outbound frame: rewrites its source address to `masq_addr`
+    /// (leaving the port) and records the flow so the reply can be reversed.
+    /// Returns whether the frame was an IPv4 UDP/TCP packet that was rewritten.
+    pub fn masquerade(&self, frame: &mut [u8], masq_addr: [u8; 4]) -> bool {
+        let Some(p) = Packet::parse(frame) else {
+            return false;
+        };
+        // Already from this address (e.g. node-originated): nothing to do.
+        if p.src == masq_addr {
+            return false;
+        }
+        self.record_masq(Masq {
+            proto: p.proto,
+            orig_src: p.src,
+            sport: p.sport,
+            masq_addr,
+            remote: p.dst,
+            rport: p.dport,
+        });
+        rewrite_src_addr(frame, &p, masq_addr);
+        true
+    }
+
+    fn record_masq(&self, entry: Masq) {
+        let mut masq = self.masq.lock();
+        if masq.iter().any(|e| {
+            e.proto == entry.proto
+                && e.orig_src == entry.orig_src
+                && e.sport == entry.sport
+                && e.remote == entry.remote
+                && e.rport == entry.rport
+        }) {
+            return;
+        }
+        if masq.len() >= MAX_CONNTRACK {
+            masq.pop_front();
+        }
+        masq.push_back(entry);
     }
 
     fn record(&self, entry: Conntrack) {
@@ -245,6 +330,18 @@ fn rewrite_dst(frame: &mut [u8], p: &Packet, addr: [u8; 4], port: u16) {
 fn rewrite_src(frame: &mut [u8], p: &Packet, addr: [u8; 4], port: u16) {
     frame[12..16].copy_from_slice(&addr);
     frame[p.l4..p.l4 + 2].copy_from_slice(&port.to_be_bytes());
+    fix_checksums(frame, p);
+}
+
+/// Rewrites only the source address (used by masquerade, which keeps the port).
+fn rewrite_src_addr(frame: &mut [u8], p: &Packet, addr: [u8; 4]) {
+    frame[12..16].copy_from_slice(&addr);
+    fix_checksums(frame, p);
+}
+
+/// Rewrites only the destination address (used by masquerade reverse).
+fn rewrite_dst_addr(frame: &mut [u8], p: &Packet, addr: [u8; 4]) {
+    frame[16..20].copy_from_slice(&addr);
     fix_checksums(frame, p);
 }
 

@@ -159,25 +159,58 @@ fn ensure_router_installed() {
 
 /// The router body: forward `frame` to the sibling bridge (not `from_id`) whose
 /// subnet contains the frame's IPv4 destination. Returns whether it forwarded.
+///
+/// If the target bridge is a masquerade *uplink*, the frame's source is rewritten
+/// to the uplink's own address on the way out (SNAT), so the outside host replies
+/// to the node rather than to an unroutable pod address. The reply is reversed by
+/// [`aster_bigtcp::nat::NatTable::apply`] on its first bridge hop back.
 fn route_between_bridges(from_id: u32, frame: &[u8]) -> bool {
     let Some(dst) = ipv4_dst(frame) else {
         return false;
     };
 
-    // Find a different bridge that owns the destination subnet, clone its hub,
-    // and release the registry lock before forwarding (which locks that hub).
+    // Find a different bridge that owns the destination subnet; capture its
+    // index and address, clone its hub, and release the registry lock before
+    // forwarding (which locks that hub).
     let target = {
         let bridges = bridges().lock();
         bridges
             .iter()
             .find(|(index, iface, _)| *index != from_id && iface_subnet_contains(iface, dst))
-            .map(|(_, _, hub)| hub.clone())
+            .map(|(index, iface, hub)| (*index, iface.ipv4_addr(), hub.clone()))
     };
-    let Some(hub) = target else {
+    let Some((index, addr, hub)) = target else {
         return false;
     };
-    hub.forward_from_local(frame.to_vec());
+
+    let mut frame = frame.to_vec();
+    if is_uplink(index)
+        && let Some(addr) = addr
+    {
+        aster_bigtcp::nat::nat_table().masquerade(&mut frame, u32::from(addr).to_be_bytes());
+    }
+    hub.forward_from_local(frame);
     true
+}
+
+/// Bridge interface indices marked as masquerade uplinks: traffic a pod-subnet
+/// bridge forwards to one of these is source-NATed to the uplink's address.
+static UPLINKS: Once<SpinLock<Vec<u32>>> = Once::new();
+
+fn uplinks() -> &'static SpinLock<Vec<u32>> {
+    UPLINKS.call_once(|| SpinLock::new(Vec::new()))
+}
+
+/// Marks the bridge with interface index `index` as a masquerade uplink.
+pub(crate) fn mark_bridge_uplink(index: u32) {
+    let mut uplinks = uplinks().lock();
+    if !uplinks.contains(&index) {
+        uplinks.push(index);
+    }
+}
+
+fn is_uplink(index: u32) -> bool {
+    uplinks().lock().contains(&index)
 }
 
 /// The IPv4 destination address of `frame`, or `None` if it is not IPv4 or is

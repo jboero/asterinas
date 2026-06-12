@@ -265,7 +265,7 @@ impl BridgeHub {
         // or rewrite a backend's reply source back to the VIP. The frame's
         // destination may change here, so route by the post-NAT destination.
         let nat = crate::nat::nat_table();
-        if !nat.is_empty() {
+        if nat.is_active() {
             nat.apply(&mut frame);
         }
 

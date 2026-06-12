@@ -150,6 +150,22 @@ pub fn sys_prctl(
                 (ports & 0xffff) as u16,
             );
         }
+        PrctlCmd::PR_ASTROKUBE_MASQ { bridge_index } => {
+            // Temporary scaffolding to mark a bridge as a masquerade uplink.
+            // Requires CAP_NET_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::NET_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "marking a masquerade uplink requires CAP_NET_ADMIN"
+                );
+            }
+            crate::net::iface::mark_bridge_uplink(bridge_index);
+        }
     }
 
     Ok(SyscallReturn::Return(0))
@@ -179,6 +195,11 @@ const PR_GET_CHILD_SUBREAPER: i32 = 37;
 /// netlink surface exists.
 const PR_ASTROKUBE_DNAT: i32 = 0x4b55_4244; // "KUBD"
 
+/// A non-Linux astrokube extension: mark a bridge (by its interface index in
+/// `arg2`) as a masquerade uplink, so traffic forwarded onto it is source-NATed
+/// to the uplink's address. Temporary scaffolding alongside [`PR_ASTROKUBE_DNAT`].
+const PR_ASTROKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
+
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum PrctlCmd {
@@ -203,6 +224,9 @@ pub enum PrctlCmd {
         backend: u32,
         ports: u32,
         proto: u32,
+    },
+    PR_ASTROKUBE_MASQ {
+        bridge_index: u32,
     },
 }
 
@@ -243,6 +267,9 @@ impl PrctlCmd {
                 backend: arg3 as u32,
                 ports: arg4 as u32,
                 proto: arg5 as u32,
+            }),
+            PR_ASTROKUBE_MASQ => Ok(PrctlCmd::PR_ASTROKUBE_MASQ {
+                bridge_index: arg2 as u32,
             }),
             _ => {
                 debug!("prctl cmd number: {}", option);

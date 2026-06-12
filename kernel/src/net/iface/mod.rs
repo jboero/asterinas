@@ -9,6 +9,7 @@ mod sched;
 mod veth;
 
 pub(in crate::net) use bridge::{bridge_hub_by_index, new_bridge, new_veth_on_bridge};
+pub(crate) use bridge::mark_bridge_uplink;
 pub use broadcast::is_broadcast_endpoint;
 pub(in crate::net) use init::new_loopback;
 pub use init::{init, iter_all_ifaces, loopback_iface, virtio_iface};
