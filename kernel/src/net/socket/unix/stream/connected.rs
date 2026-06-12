@@ -14,7 +14,7 @@ use crate::{
         unix::{
             UnixSocketAddr, addr::UnixSocketAddrBound, cred::SocketCred, ctrl_msg::AuxiliaryData,
         },
-        util::{ControlMessage, SockShutdownCmd},
+        util::{ControlMessage, SendRecvFlags, SockShutdownCmd},
     },
     prelude::*,
     process::signal::Pollee,
@@ -117,10 +117,57 @@ impl Connected {
         &self,
         writer: &mut dyn MultiWrite,
         is_seqpacket: bool,
+        flags: SendRecvFlags,
     ) -> Result<(usize, Vec<ControlMessage>)> {
+        // `MSG_PEEK` on a `SOCK_SEQPACKET` socket: copy the front datagram (up to
+        // the destination size) without consuming it, and report its true length
+        // when `MSG_TRUNC` is set. This is what `recvfrom(buf, len, MSG_PEEK |
+        // MSG_TRUNC)` does to size a datagram before reading it — a pattern Go's
+        // runtime (hence runc) relies on.
+        if is_seqpacket && flags.contains(SendRecvFlags::MSG_PEEK) {
+            let this_end = self.inner.this_end();
+            let peer_end = self.inner.peer_end();
+            if peer_end.has_aux.load(Ordering::Relaxed) {
+                let mut reader = this_end.reader.lock();
+                let read_start = reader.head();
+                let full_len = peer_end
+                    .all_aux
+                    .lock()
+                    .front()
+                    .filter(|f| f.start == read_start)
+                    .map(|f| (f.end - read_start).0);
+                if let Some(full_len) = full_len {
+                    let copied = reader.peek_fallible_with_max_len(writer, full_len)?;
+                    let reported = if flags.contains(SendRecvFlags::MSG_TRUNC) {
+                        full_len
+                    } else {
+                        copied
+                    };
+                    let is_pass_cred = this_end.is_pass_cred.load(Ordering::Relaxed);
+                    let ctrl_msgs = if is_pass_cred {
+                        AuxiliaryData::default().generate_control(is_pass_cred)
+                    } else {
+                        Vec::new()
+                    };
+                    return Ok((reported, ctrl_msgs));
+                }
+            }
+        }
+
         let is_empty = writer.is_empty();
-        if is_empty && !is_seqpacket {
-            if self.inner.this_end().reader.lock().is_empty() {
+        if is_empty {
+            // A zero-length read. If nothing is queued, report "would block"
+            // (EAGAIN) or EOF, so the caller waits rather than treating it as a
+            // closed stream. If data is queued, return 0 without consuming it —
+            // for `SOCK_SEQPACKET` this must NOT dequeue the next datagram (Linux
+            // leaves it queued; entering the receive loop below would pop its
+            // boundary and skip its bytes, destroying the message).
+            let has_data = !self.inner.this_end().reader.lock().is_empty()
+                || self.inner.peer_end().has_aux.load(Ordering::Relaxed);
+            if !has_data {
+                if self.inner.is_peer_shutdown() {
+                    return Ok((0, Vec::new()));
+                }
                 return_errno_with_message!(Errno::EAGAIN, "the channel is empty");
             }
             return Ok((0, Vec::new()));

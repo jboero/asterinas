@@ -79,6 +79,16 @@ pub trait ConsumerU8Ext {
         writer: &mut dyn MultiWrite,
         max_len: usize,
     ) -> Result<usize>;
+
+    /// Copies up to `max_len` bytes from the ring buffer into `writer` *without*
+    /// consuming them (the data stays queued). Used to implement `MSG_PEEK`.
+    ///
+    /// Returns the number of bytes copied.
+    fn peek_fallible_with_max_len(
+        &mut self,
+        writer: &mut dyn MultiWrite,
+        max_len: usize,
+    ) -> Result<usize>;
 }
 
 impl<R: Deref<Target = RingBuffer<u8>>> ConsumerU8Ext for Consumer<u8, R> {
@@ -116,6 +126,39 @@ impl<R: Deref<Target = RingBuffer<u8>>> ConsumerU8Ext for Consumer<u8, R> {
         };
 
         self.commit_read(read_len);
+        Ok(read_len)
+    }
+
+    fn peek_fallible_with_max_len(
+        &mut self,
+        writer: &mut dyn MultiWrite,
+        max_len: usize,
+    ) -> Result<usize> {
+        let len = self.len().min(max_len);
+
+        let head = self.head();
+        let offset = head.0 & (self.capacity() - 1);
+
+        let read_len = if offset + len > self.capacity() {
+            let mut read_len = 0;
+
+            let mut reader = self.segment().reader();
+            reader.skip(offset).limit(self.capacity() - offset);
+            read_len += writer.write(&mut reader)?;
+
+            let mut reader = self.segment().reader();
+            reader.limit(len - (self.capacity() - offset));
+            read_len += writer.write(&mut reader)?;
+
+            read_len
+        } else {
+            let mut reader = self.segment().reader();
+            reader.skip(offset).limit(len);
+            writer.write(&mut reader)?
+        };
+
+        // Unlike `read_fallible_with_max_len`, do NOT `commit_read`: the data
+        // remains queued for a subsequent (non-peeking) read.
         Ok(read_len)
     }
 }
