@@ -121,6 +121,33 @@ pub fn sys_prctl(
             ctx.user_space()
                 .write_val(write_addr, &(process.is_child_subreaper() as u32))?;
         }
+        PrctlCmd::PR_ASTROKUBE_DNAT {
+            vip,
+            backend,
+            ports,
+            proto,
+        } => {
+            // Temporary scaffolding to drive the Service DNAT datapath until the
+            // nftables-compatible netlink surface exists. Requires CAP_NET_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::NET_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "installing a DNAT rule requires CAP_NET_ADMIN"
+                );
+            }
+            aster_bigtcp::nat::nat_table().add_dnat(aster_bigtcp::nat::DnatRule {
+                vip: vip.to_be_bytes(),
+                vport: (ports >> 16) as u16,
+                proto: proto as u8,
+                backend: backend.to_be_bytes(),
+                bport: (ports & 0xffff) as u16,
+            });
+        }
     }
 
     Ok(SyscallReturn::Return(0))
@@ -143,6 +170,13 @@ const PR_GET_TIMERSLACK: i32 = 30;
 const PR_SET_CHILD_SUBREAPER: i32 = 36;
 const PR_GET_CHILD_SUBREAPER: i32 = 37;
 
+/// A non-Linux astrokube extension: install a Service (ClusterIP) DNAT rule.
+/// `arg2`/`arg3` are the VIP and backend IPv4 addresses as big-endian `u32`,
+/// `arg4` packs `(vport << 16) | bport`, `arg5` is the IP protocol. Temporary
+/// scaffolding that drives the kernel NAT datapath until the nftables-compatible
+/// netlink surface exists.
+const PR_ASTROKUBE_DNAT: i32 = 0x4b55_4244; // "KUBD"
+
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum PrctlCmd {
@@ -162,6 +196,12 @@ pub enum PrctlCmd {
     PR_GET_TIMERSLACK,
     PR_SET_CHILD_SUBREAPER(bool),
     PR_GET_CHILD_SUBREAPER(Vaddr),
+    PR_ASTROKUBE_DNAT {
+        vip: u32,
+        backend: u32,
+        ports: u32,
+        proto: u32,
+    },
 }
 
 #[repr(u64)]
@@ -173,7 +213,7 @@ pub enum Dumpable {
 }
 
 impl PrctlCmd {
-    fn from_args(option: i32, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> Result<PrctlCmd> {
+    fn from_args(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> Result<PrctlCmd> {
         match option {
             PR_SET_PDEATHSIG => {
                 let signum = SigNum::try_from(arg2 as u8)?;
@@ -196,6 +236,12 @@ impl PrctlCmd {
             PR_GET_TIMERSLACK => Ok(PrctlCmd::PR_GET_TIMERSLACK),
             PR_SET_CHILD_SUBREAPER => Ok(PrctlCmd::PR_SET_CHILD_SUBREAPER(arg2 > 0)),
             PR_GET_CHILD_SUBREAPER => Ok(PrctlCmd::PR_GET_CHILD_SUBREAPER(arg2 as _)),
+            PR_ASTROKUBE_DNAT => Ok(PrctlCmd::PR_ASTROKUBE_DNAT {
+                vip: arg2 as u32,
+                backend: arg3 as u32,
+                ports: arg4 as u32,
+                proto: arg5 as u32,
+            }),
             _ => {
                 debug!("prctl cmd number: {}", option);
                 return_errno_with_message!(Errno::EINVAL, "unsupported prctl command");

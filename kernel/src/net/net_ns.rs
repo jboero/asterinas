@@ -170,6 +170,17 @@ impl NetNamespace {
         {
             return iface;
         }
+        // Off-subnet IPv4: route via an interface that has a default gateway
+        // (a default route was programmed, e.g. a pod's `default via <bridge>`).
+        // Without this, off-subnet traffic — a Service VIP, the internet —
+        // falls through to the namespace default, which for a created namespace
+        // is loopback.
+        if matches!(remote, IpAddress::Ipv4(_))
+            && let Some(iface) = self
+                .with_ifaces(|ifaces| ifaces.iter().find(|i| i.ipv4_gateway().is_some()).cloned())
+        {
+            return iface;
+        }
         // For IPv6, prefer any interface that has an IPv6 address.
         if matches!(remote, IpAddress::Ipv6(_))
             && let Some(iface) =

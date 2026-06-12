@@ -210,10 +210,10 @@ impl BridgeHub {
     ///
     /// Frames from ports are untrusted; anything that does not parse as IPv4
     /// is handed to the local stack instead of being interpreted.
-    pub fn forward_from_port(&self, src_port: usize, frame: Vec<u8>) {
+    pub fn forward_from_port(&self, src_port: usize, mut frame: Vec<u8>) {
         let ports = self.ports.lock();
 
-        let Some((src, dst)) = ipv4_src_dst(&frame) else {
+        let Some((src, _dst)) = ipv4_src_dst(&frame) else {
             // Not (plausibly) IPv4. The hub cannot route it, so let the local
             // stack decide what to do with it.
             drop(ports);
@@ -222,10 +222,27 @@ impl BridgeHub {
         };
 
         // Learn the source so that later traffic destined to it can be
-        // forwarded straight to this port.
+        // forwarded straight to this port. This uses the *pre-NAT* source so a
+        // Service reply is learned by the backend's real address, not the VIP.
         if let Some(port) = ports.get(src_port) {
             port.learn(src);
         }
+        drop(ports);
+
+        // Apply Service NAT: rewrite a packet to a VIP onto its backend (DNAT),
+        // or rewrite a backend's reply source back to the VIP. The frame's
+        // destination may change here, so route by the post-NAT destination.
+        let nat = crate::nat::nat_table();
+        if !nat.is_empty() {
+            nat.apply(&mut frame);
+        }
+
+        let ports = self.ports.lock();
+        let Some((_src, dst)) = ipv4_src_dst(&frame) else {
+            drop(ports);
+            self.deliver_to_local(frame);
+            return;
+        };
 
         if is_flood_dst(dst) {
             // Broadcast/multicast: every other port and the local stack get a
