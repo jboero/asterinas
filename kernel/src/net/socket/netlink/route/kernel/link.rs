@@ -150,6 +150,41 @@ fn validate_dumplink_request(body: &LinkSegmentBody) -> Result<()> {
 /// instead of as a standalone iface, so only the `<peer>` end is visible to
 /// `RTM_GETLINK`. Attaching an existing link to a master via `RTM_SETLINK` is
 /// not yet supported; the master can only be set at creation time.
+/// Handles an `RTM_NEWLINK` that carries no `IFLA_LINKINFO`: a request to modify
+/// an existing link rather than create one (e.g. `ip link set <dev> up`).
+///
+/// Asterinas interfaces are always administratively up, so the flag change
+/// (notably `IFF_UP`) is a no-op; the only requirement is that the target link
+/// exists in the current namespace. The link is identified by its index, or by
+/// `IFLA_IFNAME` when no index is given.
+fn modify_existing_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegment>> {
+    let target_index = request_segment.body().index.map(|index| index.get());
+    let target_name = request_segment.attrs().iter().find_map(|attr| {
+        if let LinkAttr::Name(name) = attr {
+            name.to_str().ok()
+        } else {
+            None
+        }
+    });
+
+    let exists = NetNamespace::current().all_ifaces().iter().any(|iface| {
+        if let Some(index) = target_index {
+            iface.index() == index
+        } else if let Some(name) = target_name {
+            iface.name() == name
+        } else {
+            false
+        }
+    });
+
+    if !exists {
+        return_errno_with_message!(Errno::ENODEV, "no such link to modify");
+    }
+
+    // No response payload; the kernel socket sends an ACK if one was requested.
+    Ok(Vec::new())
+}
+
 pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegment>> {
     super::util::require_net_admin()?;
 
@@ -172,12 +207,13 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
         }
     }
 
-    let kind = kind.ok_or_else(|| {
-        Error::with_message(
-            Errno::EOPNOTSUPP,
-            "RTM_NEWLINK without IFLA_LINKINFO is not supported (only typed links can be created)",
-        )
-    })?;
+    let Some(kind) = kind else {
+        // An `RTM_NEWLINK` without `IFLA_LINKINFO` is not a link creation but a
+        // modification of an existing link (for example `ip link set <dev> up`,
+        // which runc issues to bring a container's loopback up). Handle it
+        // separately rather than rejecting it.
+        return modify_existing_link(request_segment);
+    };
 
     if kind != "bridge" && kind != "veth" {
         return_errno_with_message!(
