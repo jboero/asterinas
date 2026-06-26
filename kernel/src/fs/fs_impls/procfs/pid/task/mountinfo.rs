@@ -127,9 +127,19 @@ impl MountInfoFileOps {
             let source = mount.source().unwrap_or("none");
             let fs_flags = mount.fs().flags();
 
-            // The following fields are dummy for now.
-            let major = 0;
-            let minor = 0;
+            // The st_dev of the backing filesystem, reported as major:minor. This
+            // MUST match what `stat(2)` reports as `st_dev` for files on this mount
+            // (both come from the same `container_dev_id`): tools such as cAdvisor
+            // (used by the kubelet) build a partition map keyed by this major:minor
+            // from mountinfo, then stat a directory and look the device up — a
+            // hardcoded 0:0 here never matches a real block device's st_dev, so the
+            // kubelet's "get rootfs info" aborts with "could not find device in
+            // cached partitions map". A block-backed fs (ext2 on /dev/vda) reports
+            // the device's real numbers; pseudo filesystems report their anonymous
+            // (major 0) id, which is still self-consistent with stat.
+            let dev_id = mount.fs().sb().container_dev_id;
+            let major = dev_id.major().get() as u32;
+            let minor = dev_id.minor().get();
 
             let entry = MountInfoEntry {
                 mount_id,
