@@ -32,6 +32,11 @@ pub struct MemoryController {
     low: AtomicU64,
     /// The hard swap usage limit (`memory.swap.max`); `u64::MAX` means "max".
     swap_max: AtomicU64,
+    /// The OOM group flag (`memory.oom.group`, 0 or 1): when set, the cgroup is
+    /// killed as a single unit by the OOM killer. Stored for interface
+    /// compatibility — runc writes it during container init (a missing file
+    /// aborts `runc create`) — but not enforced (no cgroup-aware OOM killer yet).
+    oom_group: AtomicU64,
 }
 
 /// The sentinel value that the cgroup v2 interface renders as the string "max".
@@ -64,6 +69,10 @@ impl MemoryController {
                 SysPerms::DEFAULT_RO_ATTR_PERMS,
             );
             builder.add(SysStr::from("memory.stat"), SysPerms::DEFAULT_RO_ATTR_PERMS);
+            builder.add(
+                SysStr::from("memory.oom.group"),
+                SysPerms::DEFAULT_RW_ATTR_PERMS,
+            );
         }
     }
 
@@ -121,6 +130,9 @@ impl super::SubControl for MemoryController {
                 writeln!(printer, "slab 0")?;
                 writeln!(printer, "sock 0")?;
             }
+            "memory.oom.group" => {
+                writeln!(printer, "{}", self.oom_group.load(Ordering::Relaxed))?;
+            }
             _ => return Err(Error::AttributeError),
         }
 
@@ -128,6 +140,20 @@ impl super::SubControl for MemoryController {
     }
 
     fn write_attr(&self, name: &str, reader: &mut VmReader) -> Result<usize> {
+        // `memory.oom.group` is a 0/1 flag rather than a byte limit.
+        if name == "memory.oom.group" {
+            let (content, len) = reader
+                .read_cstring_until_end(MAX_ATTR_SIZE)
+                .map_err(|_| Error::PageFault)?;
+            let value = content
+                .to_str()
+                .map_err(|_| Error::InvalidOperation)?
+                .trim();
+            let parsed = value.parse::<u64>().map_err(|_| Error::InvalidOperation)?;
+            self.oom_group.store(parsed, Ordering::Relaxed);
+            return Ok(len);
+        }
+
         let Some(limit) = self.limit(name) else {
             return Err(Error::AttributeError);
         };
@@ -161,6 +187,7 @@ impl super::SubControlStatic for MemoryController {
             min: AtomicU64::new(0),
             low: AtomicU64::new(0),
             swap_max: AtomicU64::new(LIMIT_MAX),
+            oom_group: AtomicU64::new(0),
         }
     }
 
