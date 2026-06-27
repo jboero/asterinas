@@ -127,6 +127,28 @@ pub fn sys_prctl(
         PrctlCmd::PR_GET_NO_NEW_PRIVS => {
             return Ok(SyscallReturn::Return(ctx.posix_thread.no_new_privs() as _));
         }
+        PrctlCmd::PR_GET_SECCOMP => {
+            // Asterinas does not enforce seccomp, so the process is never in a
+            // seccomp mode: report mode 0. Crucially, returning a value (rather
+            // than EINVAL) is what makes a container runtime's "is seccomp
+            // supported?" probe — `prctl(PR_GET_SECCOMP)` then
+            // `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, NULL)` — conclude that
+            // seccomp is available. The kubelet *requires* this, because it
+            // hardcodes the pod sandbox (pause) to the RuntimeDefault seccomp
+            // profile, which containerd rejects outright ("seccomp is not
+            // supported") if the kernel reports no seccomp.
+            return Ok(SyscallReturn::Return(0));
+        }
+        PrctlCmd::PR_SET_SECCOMP(mode) => {
+            // Mirror the permissive `seccomp(2)` stub: accept STRICT and FILTER
+            // without installing or enforcing anything. See [`super::seccomp`].
+            const SECCOMP_MODE_STRICT: u64 = 1;
+            const SECCOMP_MODE_FILTER: u64 = 2;
+            if mode != SECCOMP_MODE_STRICT && mode != SECCOMP_MODE_FILTER {
+                return_errno_with_message!(Errno::EINVAL, "unsupported seccomp mode");
+            }
+            debug!("prctl PR_SET_SECCOMP: accepting mode {mode} without enforcement (stub)");
+        }
         PrctlCmd::PR_ASTROKUBE_DNAT {
             vip,
             backend,
@@ -185,6 +207,8 @@ const PR_GET_KEEPCAPS: i32 = 7;
 const PR_SET_KEEPCAPS: i32 = 8;
 const PR_SET_NAME: i32 = 15;
 const PR_GET_NAME: i32 = 16;
+const PR_GET_SECCOMP: i32 = 21;
+const PR_SET_SECCOMP: i32 = 22;
 const PR_CAPBSET_READ: i32 = 23;
 const PR_CAPBSET_DROP: i32 = 24;
 const PR_GET_SECUREBITS: i32 = 27;
@@ -229,6 +253,8 @@ pub enum PrctlCmd {
     PR_GET_CHILD_SUBREAPER(Vaddr),
     PR_SET_NO_NEW_PRIVS,
     PR_GET_NO_NEW_PRIVS,
+    PR_GET_SECCOMP,
+    PR_SET_SECCOMP(u64),
     PR_ASTROKUBE_DNAT {
         vip: u32,
         backend: u32,
@@ -281,6 +307,8 @@ impl PrctlCmd {
                 Ok(PrctlCmd::PR_SET_NO_NEW_PRIVS)
             }
             PR_GET_NO_NEW_PRIVS => Ok(PrctlCmd::PR_GET_NO_NEW_PRIVS),
+            PR_GET_SECCOMP => Ok(PrctlCmd::PR_GET_SECCOMP),
+            PR_SET_SECCOMP => Ok(PrctlCmd::PR_SET_SECCOMP(arg2)),
             PR_ASTROKUBE_DNAT => Ok(PrctlCmd::PR_ASTROKUBE_DNAT {
                 vip: arg2 as u32,
                 backend: arg3 as u32,
