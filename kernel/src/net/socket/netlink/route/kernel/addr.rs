@@ -119,10 +119,18 @@ fn iface_to_new_addr(request_header: &CMsgSegHdr, iface: &Arc<Iface>) -> Option<
         index: NonZeroU32::new(iface.index()),
     };
 
+    // Attribute order matches Linux's canonical RTM_NEWADDR layout:
+    // IFA_ADDRESS, IFA_LOCAL, then IFA_LABEL. The order is load-bearing: Go's
+    // net.InterfaceAddrs() (net/interface_linux.go), when IFA_LOCAL is present,
+    // skips IFA_ADDRESS and reads the *next* attribute as the 4-byte IPv4
+    // address. If IFA_LABEL (the interface name, e.g. "lo" = 3 bytes) comes
+    // before IFA_LOCAL, Go reads the label as an address and panics with
+    // "index out of range [3] with length 3" — which crashes the kubelet (and
+    // any Go program enumerating interface addresses).
     let attrs = vec![
         AddrAttr::Address(ipv4_addr.octets()),
-        AddrAttr::Label(CString::new(iface.name()).unwrap()),
         AddrAttr::Local(ipv4_addr.octets()),
+        AddrAttr::Label(CString::new(iface.name()).unwrap()),
     ];
 
     Some(AddrSegment::new(header, addr_message, attrs))
