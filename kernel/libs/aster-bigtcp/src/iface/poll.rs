@@ -7,7 +7,7 @@ use smoltcp::{
         Context,
         packet::{IpPayload, Packet, icmp_reply_payload_len},
     },
-    phy::{ChecksumCapabilities, Device, RxToken, TxToken},
+    phy::{ChecksumCapabilities, Device, Medium, RxToken, TxToken},
     wire::{
         IPV4_HEADER_LEN, IPV4_MIN_MTU, IcmpRepr, Icmpv4DstUnreachable, Icmpv4Packet, Icmpv4Repr,
         IpAddress, IpProtocol, IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr,
@@ -72,8 +72,29 @@ impl<E: Ext> PollContext<'_, E> {
             >,
         Q: FnMut(&Packet, &mut Context, D::TxToken<'_>),
     {
+        // astrokube: only the Ethernet uplink (eth0) carries node-originated
+        // Service traffic that needs reverse-NAT; pod bridges (Medium::Ip) handle
+        // their own NAT in the bridge hub.
+        let nat_ethernet = device.capabilities().medium == Medium::Ethernet;
         while let Some((rx_token, tx_token)) = device.receive(self.iface.context().now()) {
             rx_token.consume(|data| {
+                // astrokube: reverse-NAT a reply to a node-originated ClusterIP
+                // flow before the stack parses it, so the socket (bound to the
+                // VIP) accepts it. RxToken data is read-only, so we NAT a copy;
+                // when nothing matches, apply() leaves it untouched and we fall
+                // through to the original buffer with no extra work beyond a copy.
+                const ETHER_HEADER_LEN: usize = 14;
+                let mut nat_buf;
+                let data: &[u8] = if nat_ethernet
+                    && data.len() > ETHER_HEADER_LEN
+                    && crate::nat::nat_table().is_active()
+                {
+                    nat_buf = data.to_vec();
+                    crate::nat::nat_table().apply(&mut nat_buf[ETHER_HEADER_LEN..]);
+                    &nat_buf
+                } else {
+                    data
+                };
                 let Some((ip_packet, tx_token)) =
                     process_phy(data, self.iface.context_mut(), tx_token)
                 else {

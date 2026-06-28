@@ -291,6 +291,10 @@ struct Packet {
     dport: u16,
     /// Offset of the L4 header (IPv4 header length).
     l4: usize,
+    /// Total IPv4 packet length from the header, used to bound checksum
+    /// recomputation. A received Ethernet frame may carry padding past the IP
+    /// packet (minimum frame size), which must not be folded into the checksum.
+    total_len: usize,
 }
 
 impl Packet {
@@ -306,6 +310,14 @@ impl Packet {
         if proto != PROTO_TCP && proto != PROTO_UDP {
             return None;
         }
+        // Trust the IP total-length field, but never read past the buffer; fall
+        // back to the buffer length if it is absent or implausible.
+        let declared = u16::from_be_bytes([frame[2], frame[3]]) as usize;
+        let total_len = if declared >= ihl + 4 && declared <= frame.len() {
+            declared
+        } else {
+            frame.len()
+        };
         let src = [frame[12], frame[13], frame[14], frame[15]];
         let dst = [frame[16], frame[17], frame[18], frame[19]];
         let sport = u16::from_be_bytes([frame[ihl], frame[ihl + 1]]);
@@ -317,6 +329,7 @@ impl Packet {
             sport,
             dport,
             l4: ihl,
+            total_len,
         })
     }
 }
@@ -354,21 +367,22 @@ fn fix_checksums(frame: &mut [u8], p: &Packet) {
     let ip_csum = checksum(&frame[..p.l4]);
     frame[10..12].copy_from_slice(&ip_csum.to_be_bytes());
 
-    // L4 checksum over the pseudo-header + L4 segment.
-    let l4_len = frame.len() - p.l4;
+    // L4 checksum over the pseudo-header + L4 segment. Bound by the IP total
+    // length so trailing Ethernet padding on received frames is excluded.
+    let l4_len = p.total_len - p.l4;
     let csum_off = match p.proto {
         PROTO_UDP => p.l4 + 6,
         PROTO_TCP => p.l4 + 16,
         _ => return,
     };
-    if frame.len() < csum_off + 2 {
+    if p.total_len < csum_off + 2 {
         return;
     }
     frame[csum_off] = 0;
     frame[csum_off + 1] = 0;
 
     let mut sum = pseudo_header_sum(frame, p.proto, l4_len as u16);
-    sum += sum_words(&frame[p.l4..]);
+    sum += sum_words(&frame[p.l4..p.total_len]);
     let mut folded = fold(sum);
     if p.proto == PROTO_UDP && folded == 0 {
         // A zero UDP checksum means "no checksum"; the real value 0 is sent as
