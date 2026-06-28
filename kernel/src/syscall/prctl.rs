@@ -194,6 +194,26 @@ pub fn sys_prctl(
             }
             crate::net::iface::mark_bridge_uplink(bridge_index);
         }
+        PrctlCmd::PR_ASTROKUBE_ACPI => {
+            // Arm the ACPI power-button monitor so an orderly host poweroff
+            // (QEMU `system_powerdown` / virsh shutdown) is delivered to PID 1
+            // as SIGINT for graceful node drain. Spawning the monitor thread
+            // from this fully-scheduled syscall context avoids the early-boot
+            // deadlock of spawning a self-blocking thread before the idle loop.
+            // Requires CAP_SYS_BOOT (the init holds it).
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_BOOT)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "arming the ACPI power-button monitor requires CAP_SYS_BOOT"
+                );
+            }
+            crate::arch::init_late();
+        }
     }
 
     Ok(SyscallReturn::Return(0))
@@ -232,6 +252,11 @@ const PR_ASTROKUBE_DNAT: i32 = 0x4b55_4244; // "KUBD"
 /// to the uplink's address. Temporary scaffolding alongside [`PR_ASTROKUBE_DNAT`].
 const PR_ASTROKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
 
+/// A non-Linux astrokube extension: arm the ACPI power-button monitor so an
+/// orderly host poweroff is delivered to PID 1 as SIGINT for a graceful node
+/// drain. Called once by the init after the node is up; takes no arguments.
+const PR_ASTROKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
+
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum PrctlCmd {
@@ -264,6 +289,7 @@ pub enum PrctlCmd {
     PR_ASTROKUBE_MASQ {
         bridge_index: u32,
     },
+    PR_ASTROKUBE_ACPI,
 }
 
 #[repr(u64)]
@@ -318,6 +344,7 @@ impl PrctlCmd {
             PR_ASTROKUBE_MASQ => Ok(PrctlCmd::PR_ASTROKUBE_MASQ {
                 bridge_index: arg2 as u32,
             }),
+            PR_ASTROKUBE_ACPI => Ok(PrctlCmd::PR_ASTROKUBE_ACPI),
             _ => {
                 debug!("prctl cmd number: {}", option);
                 return_errno_with_message!(Errno::EINVAL, "unsupported prctl command");

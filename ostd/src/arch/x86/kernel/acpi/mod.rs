@@ -108,6 +108,18 @@ pub struct AcpiInfo {
     pub boot_flags: Option<IaPcBootArchFlags>,
     /// An I/O port to reset the machine by writing the specified value.
     pub reset_port_and_val: Option<(u16, u8)>,
+    /// The I/O port of the PM1a event register block (the "PM1a_EVT_BLK" field in
+    /// the FADT). The PM1 status register lives at this port; its `PWRBTN_STS`
+    /// bit reports an ACPI power-button (e.g. QEMU `system_powerdown`) event.
+    pub pm1a_event_block: Option<u16>,
+    /// The I/O port of the PM1a control register block (the "PM1a_CNT_BLK" field
+    /// in the FADT). Its `SCI_EN` bit (bit 0) reports whether the OS owns ACPI.
+    pub pm1a_control_block: Option<u16>,
+    /// `(SMI_CMD port, ACPI_ENABLE value)` from the FADT: writing the value to the
+    /// port hands ACPI ownership to the OS (`SCI_EN` becomes 1), which is what
+    /// makes the platform post power-button events to the OS-visible registers.
+    /// `None` if the platform exposes no SMI command port (already OS-owned).
+    pub acpi_enable_command: Option<(u16, u8)>,
     /// A memory region that is stolen for PCI configuration space.
     pub pci_ecam_region: Option<PciEcamRegion>,
 }
@@ -131,6 +143,9 @@ pub(in crate::arch) fn init() {
         century_register: None,
         boot_flags: None,
         reset_port_and_val: None,
+        pm1a_event_block: None,
+        pm1a_control_block: None,
+        acpi_enable_command: None,
         pci_ecam_region: None,
     };
 
@@ -148,6 +163,26 @@ pub(in crate::arch) fn init() {
             && let Ok(reset_port) = reset_reg.address.try_into()
         {
             acpi_info.reset_port_and_val = Some((reset_port, fadt.reset_value));
+        }
+        if let Ok(pm1a_evt) = fadt.pm1a_event_block()
+            && pm1a_evt.address_space == AddressSpace::SystemIo
+            && let Ok(pm1a_port) = pm1a_evt.address.try_into()
+        {
+            acpi_info.pm1a_event_block = Some(pm1a_port);
+        }
+        if let Ok(pm1a_cnt) = fadt.pm1a_control_block()
+            && pm1a_cnt.address_space == AddressSpace::SystemIo
+            && let Ok(pm1a_cnt_port) = pm1a_cnt.address.try_into()
+        {
+            acpi_info.pm1a_control_block = Some(pm1a_cnt_port);
+        }
+        // A zero SMI command port (or zero enable value) means the platform is
+        // already in ACPI mode and needs no hand-off.
+        if fadt.smi_cmd_port != 0
+            && fadt.acpi_enable != 0
+            && let Ok(smi_port) = u16::try_from(fadt.smi_cmd_port)
+        {
+            acpi_info.acpi_enable_command = Some((smi_port, fadt.acpi_enable));
         }
     };
 
