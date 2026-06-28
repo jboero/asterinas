@@ -10,8 +10,8 @@ use super::{
 };
 use crate::{
     net::socket::netlink::{
-        addr::UNSPECIFIED_PORT, kobject_uevent::UeventMessage, receiver::MessageReceiver,
-        route::RtnlMessage,
+        addr::UNSPECIFIED_PORT, kobject_uevent::UeventMessage, netfilter::NfnlMessage,
+        receiver::MessageReceiver, route::RtnlMessage,
     },
     prelude::*,
     util::random::getrandom,
@@ -25,6 +25,7 @@ static NETLINK_SOCKET_TABLE: Once<NetlinkSocketTable> = Once::new();
 struct NetlinkSocketTable {
     route: RwMutex<ProtocolSocketTable<RtnlMessage>>,
     uevent: RwMutex<ProtocolSocketTable<UeventMessage>>,
+    netfilter: RwMutex<ProtocolSocketTable<NfnlMessage>>,
 }
 
 impl NetlinkSocketTable {
@@ -32,6 +33,7 @@ impl NetlinkSocketTable {
         Self {
             route: RwMutex::new(ProtocolSocketTable::new()),
             uevent: RwMutex::new(ProtocolSocketTable::new()),
+            netfilter: RwMutex::new(ProtocolSocketTable::new()),
         }
     }
 }
@@ -84,6 +86,16 @@ impl SupportedNetlinkProtocol for NetlinkUeventProtocol {
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
         &NETLINK_SOCKET_TABLE.get().unwrap().uevent
+    }
+}
+
+pub enum NetlinkNetfilterProtocol {}
+
+impl SupportedNetlinkProtocol for NetlinkNetfilterProtocol {
+    type Message = NfnlMessage;
+
+    fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
+        &NETLINK_SOCKET_TABLE.get().unwrap().netfilter
     }
 }
 

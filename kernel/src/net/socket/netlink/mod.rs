@@ -41,6 +41,7 @@ mod addr;
 mod common;
 mod kobject_uevent;
 mod message;
+mod netfilter;
 mod options;
 mod receiver;
 mod route;
@@ -48,6 +49,7 @@ mod table;
 
 pub use addr::{GroupIdSet, NetlinkSocketAddr};
 pub use kobject_uevent::NetlinkUeventSocket;
+pub use netfilter::NetlinkNetfilterSocket;
 pub use options::{AddMembership, DropMembership};
 pub(super) use receiver::NETLINK_DEFAULT_BUF_SIZE;
 pub use route::NetlinkRouteSocket;
