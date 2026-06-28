@@ -39,6 +39,9 @@ fn is_nft_get(msg: u16) -> bool {
 
 /// Handles one request segment by enqueuing any response back to the sender.
 pub(super) fn handle_request(segment: &NfnlSegment, dst_port: PortNum) {
+    // Lower any Service rules kube-proxy is programming into the NAT datapath.
+    super::translate::observe(segment.header(), segment.payload());
+
     let responses = compute_responses(segment.header());
     if responses.is_empty() {
         return;

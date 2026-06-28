@@ -10,7 +10,7 @@
 //! into the native NAT datapath is future work.
 
 use align_ext::AlignExt;
-use ostd::mm::VmReader;
+use ostd::mm::{VmReader, VmWriter};
 
 use crate::{
     net::socket::netlink::message::{
@@ -26,13 +26,21 @@ pub(in crate::net::socket::netlink) type NfnlMessage = Message<NfnlSegment>;
 
 /// A single netfilter netlink segment: the fixed header plus a raw payload.
 ///
-/// For parsed *requests* the payload is dropped (only the header drives the
-/// minimal handler). For *responses* the payload carries the hand-built body
-/// (e.g. an `nlmsgerr` ack, a `NFT_MSG_NEWGEN` generation message).
+/// The payload is retained (not just skipped): for *requests* it carries the
+/// nftables body that the rule translator parses (`super::translate`); for
+/// *responses* it carries the hand-built body (e.g. an `nlmsgerr` ack, a
+/// `NFT_MSG_NEWGEN` generation message).
 #[derive(Debug)]
 pub struct NfnlSegment {
     header: CMsgSegHdr,
     payload: Vec<u8>,
+}
+
+impl NfnlSegment {
+    /// The message body following the fixed header.
+    pub(super) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 impl NfnlSegment {
@@ -98,15 +106,19 @@ impl ProtocolSegment for NfnlSegment {
             return_errno_with_message!(Errno::EINVAL, "no more netlink netfilter segments");
         };
 
-        // Validate `header.len` and skip the payload (with padding). An invalid
-        // length is unrecoverable, so propagate the error to stop parsing.
+        // Validate `header.len`, then read the payload (retained for the rule
+        // translator) and skip the trailing alignment padding. An invalid length
+        // is unrecoverable, so propagate the error to stop parsing.
         let payload_len_with_padding = header.calc_payload_len_with_padding(reader)?;
-        reader.skip_some(payload_len_with_padding);
+        let payload_len = (header.len as usize).saturating_sub(size_of::<CMsgSegHdr>());
+        let mut payload = vec![0u8; payload_len];
+        if payload_len > 0 {
+            let mut writer = VmWriter::from(payload.as_mut_slice());
+            reader.read(&mut writer).map_err(|(err, _)| err)?;
+        }
+        reader.skip_some(payload_len_with_padding - payload_len);
 
-        Ok(ContinueRead::Parsed(Self {
-            header,
-            payload: Vec::new(),
-        }))
+        Ok(ContinueRead::Parsed(Self { header, payload }))
     }
 
     fn write_to(&self, writer: &mut dyn MultiWrite) -> Result<()> {

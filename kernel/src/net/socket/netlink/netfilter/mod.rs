@@ -16,5 +16,6 @@ use crate::net::socket::netlink::{common::NetlinkSocket, table::NetlinkNetfilter
 mod bound;
 mod kernel;
 mod message;
+mod translate;
 
 pub type NetlinkNetfilterSocket = NetlinkSocket<NetlinkNetfilterProtocol>;
