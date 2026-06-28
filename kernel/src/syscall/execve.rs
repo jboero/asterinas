@@ -19,13 +19,14 @@ pub fn sys_execve(
     ctx: &Context,
     user_context: &mut UserContext,
 ) -> Result<SyscallReturn> {
-    let (elf_file, thread_name) = {
+    let (elf_file, exec_path, thread_name) = {
         let flags = OpenFlags::empty();
         lookup_executable_file(AT_FDCWD, filename_ptr, flags, ctx)?
     };
 
     do_execve(
         elf_file,
+        exec_path,
         thread_name,
         argv_ptr_ptr,
         envp_ptr_ptr,
@@ -44,7 +45,7 @@ pub fn sys_execveat(
     ctx: &Context,
     user_context: &mut UserContext,
 ) -> Result<SyscallReturn> {
-    let (elf_file, thread_name) = {
+    let (elf_file, exec_path, thread_name) = {
         let flags = OpenFlags::from_bits(flags)
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid flags"))?;
         lookup_executable_file(dfd, filename_ptr, flags, ctx)?
@@ -52,6 +53,7 @@ pub fn sys_execveat(
 
     do_execve(
         elf_file,
+        exec_path,
         thread_name,
         argv_ptr_ptr,
         envp_ptr_ptr,
@@ -66,12 +68,12 @@ fn lookup_executable_file(
     filename_ptr: Vaddr,
     flags: OpenFlags,
     ctx: &Context,
-) -> Result<(Path, ThreadName)> {
-    let filename = ctx
+) -> Result<(Path, CString, ThreadName)> {
+    let filename_cstr = ctx
         .user_space()
         .read_cstring(filename_ptr, MAX_FILENAME_LEN)?;
 
-    let filename = filename.to_string_lossy();
+    let filename = filename_cstr.to_string_lossy();
     let path = {
         let fs_path = FsPath::from_fd_at(dfd, &filename, EmptyPathStr::AllowIfFlag(flags.bits()))?;
 
@@ -93,7 +95,16 @@ fn lookup_executable_file(
         ThreadName::new_from_executable_path(&filename)
     };
 
-    Ok((path, thread_name))
+    // The exec path the user gave (before symlink resolution) is what an
+    // interpreter for a `#!` script should receive as `$0`. Fall back to the
+    // resolved name only for the pathless `execveat(AT_EMPTY_PATH)` case.
+    let exec_path = if filename.is_empty() {
+        CString::new(path.name()).unwrap_or(filename_cstr)
+    } else {
+        filename_cstr
+    };
+
+    Ok((path, exec_path, thread_name))
 }
 
 bitflags::bitflags! {

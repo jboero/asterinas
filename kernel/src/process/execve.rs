@@ -33,6 +33,7 @@ use crate::{
 
 pub fn do_execve(
     elf_file: Path,
+    exec_path: CString,
     thread_name: ThreadName,
     argv_ptr_ptr: Vaddr,
     envp_ptr_ptr: Vaddr,
@@ -58,7 +59,7 @@ pub fn do_execve(
     );
 
     let program_to_load =
-        ProgramToLoad::build_from_file(elf_file.clone(), &path_resolver, argv, envp)?;
+        ProgramToLoad::build_from_file(elf_file.clone(), &path_resolver, argv, envp, exec_path)?;
 
     let new_vmar = VmarHandle::new(ProcessVm::new(elf_file.clone()));
     let elf_load_info = program_to_load.load_to_vmar(&new_vmar, &path_resolver)?;
