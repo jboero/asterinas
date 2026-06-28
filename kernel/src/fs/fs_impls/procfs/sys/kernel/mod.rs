@@ -6,7 +6,7 @@ use crate::{
         procfs::{
             ProcDir, StaticEntry,
             sys::kernel::{
-                cap_last_cap::CapLastCapFileOps, keys::KeysDirOps,
+                cap_last_cap::CapLastCapFileOps, keys::KeysDirOps, osrelease::OsReleaseFileOps,
                 panic::{PanicFileOps, PanicOnOopsFileOps}, pid_max::PidMaxFileOps,
                 yama::YamaDirOps,
             },
@@ -23,6 +23,7 @@ use crate::{
 
 mod cap_last_cap;
 mod keys;
+mod osrelease;
 mod panic;
 mod pid_max;
 mod yama;
@@ -45,6 +46,7 @@ impl KernelDirOps {
             CapLastCapFileOps::new_inode,
         ),
         ("pid_max", InodeType::File, PidMaxFileOps::new_inode),
+        ("osrelease", InodeType::File, OsReleaseFileOps::new_inode),
         ("panic", InodeType::File, PanicFileOps::new_inode),
         (
             "panic_on_oops",
