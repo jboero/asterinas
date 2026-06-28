@@ -80,7 +80,17 @@ fn compute_responses(header: &CMsgSegHdr) -> Vec<NfnlSegment> {
             // NEW*/DEL* rule programming: accepted as a no-op for now.
             ack_if_requested(header)
         }
-        _ => ack_if_requested(header),
+        // Other netfilter subsystems (e.g. conntrack, NFNL_SUBSYS_CTNETLINK):
+        // answer a dump with an empty-but-terminated result rather than nothing,
+        // so a lister (kube-proxy reconciles conntrack on each sync) sees "zero
+        // entries" instead of logging "Failed to list conntrack entries:
+        // resource temporarily unavailable".
+        _ => {
+            if is_dump_request(header) {
+                return vec![NfnlSegment::done(header)];
+            }
+            ack_if_requested(header)
+        }
     }
 }
 
