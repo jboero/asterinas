@@ -63,15 +63,42 @@ impl UserNamespace {
         self.level
     }
 
-    /// Checks whether the thread has the required capability in this user namespace.
-    pub fn check_cap(&self, required: CapSet, posix_thread: &PosixThread) -> Result<()> {
-        // Since creating new user namespaces is not supported at the moment,
-        // there is effectively only one user namespace in the entire system.
-        // Therefore, the thread has a single set of capabilities used for permission checks.
-        // FIXME: Once support for creating new user namespaces is added,
-        // we should verify the thread's capabilities within the relevant user namespace.
-        let cap_set = posix_thread.credentials().effective_capset();
-        if cap_set.contains(required) {
+    /// Checks whether `posix_thread` holds `required` over a resource owned by
+    /// this user namespace (`self`).
+    ///
+    /// This is the user-namespace capability boundary — what makes "root in a
+    /// container" powerless on the host. Two ways to hold the capability:
+    ///
+    /// 1. **Owner of the namespace subtree.** A process is effectively root
+    ///    *within a user namespace it created and that namespace's descendants*
+    ///    (but never the initial namespace): it may act on resources owned by
+    ///    that subtree. This is what lets an unprivileged process create its own
+    ///    namespaces (rootless containers).
+    /// 2. **Holds the capability in its effective set**, with its own user
+    ///    namespace an ancestor of (or equal to) the resource's.
+    ///
+    /// Crucially, rule 1 grants nothing through the *global* capability set, so
+    /// the direct `effective_capset()` checks elsewhere (DAC_OVERRIDE, setuid,
+    /// the astrokube prctls, ...) are unaffected: an unprivileged container root
+    /// still fails them against host resources. That keeps the boundary safe
+    /// without ns-scoping every capability check individually.
+    ///
+    /// For the initial namespace — the entire existing system — `actor_ns` is
+    /// the init namespace, which is an ancestor of every resource, so this
+    /// reduces to the previous behavior (`effective_capset().contains`).
+    pub fn check_cap(self: &Arc<Self>, required: CapSet, posix_thread: &PosixThread) -> Result<()> {
+        let actor_ns = posix_thread.process().user_ns().lock().clone();
+        let init_ns = Self::get_init_singleton();
+
+        // Rule 1: root within your own (non-initial) user-namespace subtree.
+        if !Arc::ptr_eq(&actor_ns, init_ns) && actor_ns.is_same_or_ancestor_of(self) {
+            return Ok(());
+        }
+
+        // Rule 2: hold the capability in the effective set, scoped by ns ancestry.
+        if actor_ns.is_same_or_ancestor_of(self)
+            && posix_thread.credentials().effective_capset().contains(required)
+        {
             return Ok(());
         }
 
