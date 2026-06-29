@@ -13,15 +13,20 @@ args = "$(./tools/qemu_args.sh normal)"
 
 # Special options for running
 [run.boot]
+# astrokube: boot the astrokube Go init as PID 1.
+# /sbin/init is a symlink to the static Go init binary inside the initramfs; the
+# init detects it is PID 1 and acts as the system init (mount filesystems, run
+# pods as the node agent, then power off). No shell, no busybox, no libc.
 kcmd_args = [
     "SHELL=/bin/sh",
     "LOGNAME=root",
     "HOME=/",
     "USER=root",
-    "PATH=/bin:/benchmark",
-    "init=/init",
+    "PATH=/bin:/sbin:/usr/bin",
+    "console=hvc0",
+    "init=/sbin/init",
 ]
-init_args = ["sh", "-l"]
+init_args = []
 initramfs = "test/initramfs/build/initramfs.cpio.gz"
 
 # Special options for testing
