@@ -31,7 +31,7 @@ pub use namespace::{
     nsproxy::{ContextSetNsAdminApi, NsProxy, NsProxyBuilder, check_unsupported_ns_flags},
     pid_ns::PidNamespace,
     unshare::ContextUnshareAdminApi,
-    user_ns::UserNamespace,
+    user_ns::{IdMapKind, UserNamespace},
 };
 pub use pid_file::PidFile;
 pub use process::{
