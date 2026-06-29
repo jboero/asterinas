@@ -112,6 +112,11 @@ pub struct PosixThread {
     /// set it cannot be cleared, and an `execve` may not grant new privileges.
     /// Container runtimes (runc) set this before exec'ing the entrypoint.
     no_new_privs: AtomicBool,
+
+    /// Installed seccomp BPF policy for this thread (empty by default, so it has
+    /// no effect unless a filter is installed). Inherited on clone/fork and
+    /// preserved across execve.
+    seccomp: crate::seccomp::SeccompState,
 }
 
 impl PosixThread {
@@ -342,6 +347,11 @@ impl PosixThread {
     /// Sets `no_new_privs` for this thread. In Linux it can only be turned on.
     pub fn set_no_new_privs(&self) {
         self.no_new_privs.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns this thread's seccomp policy state.
+    pub fn seccomp(&self) -> &crate::seccomp::SeccompState {
+        &self.seccomp
     }
 
     pub fn reset_timer_slack_to_default(&self) {

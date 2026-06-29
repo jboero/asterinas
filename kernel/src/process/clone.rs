@@ -485,6 +485,11 @@ fn clone_child_task(
         thread_builder.build()
     };
 
+    // Inherit the parent thread's seccomp policy (the filters are shared `Arc`s).
+    if let Some(child_pt) = child_task.as_posix_thread() {
+        child_pt.seccomp().inherit_from(ctx.posix_thread.seccomp());
+    }
+
     process
         .tasks()
         .lock()
@@ -658,6 +663,13 @@ fn clone_child_process(
             child_thread_builder,
         )
     };
+
+    // Inherit the parent thread's seccomp policy into the new process's main
+    // thread (the filters are shared `Arc`s; fork keeps the parent's policy).
+    let child_main = child.main_thread();
+    if let Some(child_pt) = child_main.as_posix_thread() {
+        child_pt.seccomp().inherit_from(ctx.posix_thread.seccomp());
+    }
 
     clone_pidfd(ctx, &child, clone_flags, clone_args.pidfd)?;
 

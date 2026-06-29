@@ -128,26 +128,24 @@ pub fn sys_prctl(
             return Ok(SyscallReturn::Return(ctx.posix_thread.no_new_privs() as _));
         }
         PrctlCmd::PR_GET_SECCOMP => {
-            // Asterinas does not enforce seccomp, so the process is never in a
-            // seccomp mode: report mode 0. Crucially, returning a value (rather
-            // than EINVAL) is what makes a container runtime's "is seccomp
-            // supported?" probe — `prctl(PR_GET_SECCOMP)` then
-            // `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, NULL)` — conclude that
-            // seccomp is available. The kubelet *requires* this, because it
-            // hardcodes the pod sandbox (pause) to the RuntimeDefault seccomp
-            // profile, which containerd rejects outright ("seccomp is not
-            // supported") if the kernel reports no seccomp.
-            return Ok(SyscallReturn::Return(0));
+            // Report the calling thread's actual seccomp mode (0 = disabled,
+            // 1 = strict, 2 = filter). Returning a value (rather than EINVAL) is
+            // also what makes a container runtime's "is seccomp supported?"
+            // probe conclude seccomp is available — which the kubelet requires,
+            // since it pins the pod sandbox (pause) to the RuntimeDefault
+            // profile and containerd rejects a node that reports no seccomp.
+            return Ok(SyscallReturn::Return(ctx.posix_thread.seccomp().mode() as _));
         }
-        PrctlCmd::PR_SET_SECCOMP(mode) => {
-            // Mirror the permissive `seccomp(2)` stub: accept STRICT and FILTER
-            // without installing or enforcing anything. See [`super::seccomp`].
+        PrctlCmd::PR_SET_SECCOMP { mode, filter_ptr } => {
+            // Legacy filter-install path. Modern runtimes use the seccomp(2)
+            // syscall, but honor prctl too so older tooling enforces as well.
             const SECCOMP_MODE_STRICT: u64 = 1;
             const SECCOMP_MODE_FILTER: u64 = 2;
-            if mode != SECCOMP_MODE_STRICT && mode != SECCOMP_MODE_FILTER {
-                return_errno_with_message!(Errno::EINVAL, "unsupported seccomp mode");
+            match mode {
+                SECCOMP_MODE_STRICT => super::seccomp::do_set_mode_strict(ctx),
+                SECCOMP_MODE_FILTER => super::seccomp::do_set_mode_filter(filter_ptr, ctx)?,
+                _ => return_errno_with_message!(Errno::EINVAL, "unsupported seccomp mode"),
             }
-            debug!("prctl PR_SET_SECCOMP: accepting mode {mode} without enforcement (stub)");
         }
         PrctlCmd::PR_ASTROKUBE_DNAT {
             vip,
@@ -279,7 +277,7 @@ pub enum PrctlCmd {
     PR_SET_NO_NEW_PRIVS,
     PR_GET_NO_NEW_PRIVS,
     PR_GET_SECCOMP,
-    PR_SET_SECCOMP(u64),
+    PR_SET_SECCOMP { mode: u64, filter_ptr: Vaddr },
     PR_ASTROKUBE_DNAT {
         vip: u32,
         backend: u32,
@@ -334,7 +332,10 @@ impl PrctlCmd {
             }
             PR_GET_NO_NEW_PRIVS => Ok(PrctlCmd::PR_GET_NO_NEW_PRIVS),
             PR_GET_SECCOMP => Ok(PrctlCmd::PR_GET_SECCOMP),
-            PR_SET_SECCOMP => Ok(PrctlCmd::PR_SET_SECCOMP(arg2)),
+            PR_SET_SECCOMP => Ok(PrctlCmd::PR_SET_SECCOMP {
+                mode: arg2,
+                filter_ptr: arg3 as _,
+            }),
             PR_ASTROKUBE_DNAT => Ok(PrctlCmd::PR_ASTROKUBE_DNAT {
                 vip: arg2 as u32,
                 backend: arg3 as u32,
