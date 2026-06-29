@@ -8,9 +8,25 @@ use crate::{
     process::{Uid, credentials::capabilities::CapSet, posix_thread::PosixThread},
 };
 
+/// Linux's `MAX_USER_NS_LEVEL` — the deepest user-namespace nesting allowed.
+const MAX_USER_NS_LEVEL: u32 = 32;
+
 /// The user namespace.
+///
+/// User namespaces form a tree rooted at the initial namespace (level 0). A new
+/// namespace records its parent, its nesting level, and the uid that created it
+/// (its owner). NOTE (astrokube Stage 0/1): capabilities are not yet scoped to
+/// the namespace — `check_cap` still tests the thread's single global capability
+/// set, so creating a user namespace grants no new privilege. ID mapping and
+/// ns-aware capability checks are later stages (see astrokube/USER-NAMESPACES.md).
 pub struct UserNamespace {
     stashed_dentry: StashedDentry,
+    /// The parent namespace, or `None` for the initial (root) namespace.
+    parent: Option<Arc<UserNamespace>>,
+    /// Nesting depth; the initial namespace is level 0.
+    level: u32,
+    /// The uid that created this namespace (root for the initial namespace).
+    owner_uid: Uid,
 }
 
 impl UserNamespace {
@@ -21,8 +37,30 @@ impl UserNamespace {
         INIT.call_once(|| {
             Arc::new(Self {
                 stashed_dentry: StashedDentry::new(),
+                parent: None,
+                level: 0,
+                owner_uid: Uid::new_root(),
             })
         })
+    }
+
+    /// Creates a new child user namespace owned by `owner_uid`, nested under
+    /// `parent`. Fails if the nesting limit would be exceeded.
+    pub fn new_child(parent: &Arc<UserNamespace>, owner_uid: Uid) -> Result<Arc<UserNamespace>> {
+        if parent.level >= MAX_USER_NS_LEVEL {
+            return_errno_with_message!(Errno::EINVAL, "user namespace nesting too deep");
+        }
+        Ok(Arc::new(Self {
+            stashed_dentry: StashedDentry::new(),
+            parent: Some(parent.clone()),
+            level: parent.level + 1,
+            owner_uid,
+        }))
+    }
+
+    /// The nesting depth of this namespace (0 for the initial namespace).
+    pub fn level(&self) -> u32 {
+        self.level
     }
 
     /// Checks whether the thread has the required capability in this user namespace.
@@ -45,19 +83,22 @@ impl UserNamespace {
 
     /// Returns the owner UID of the user namespace.
     pub fn owner_uid(&self) -> Result<Uid> {
-        // FIXME: The owner of the user namespace is not yet tracked.
-        // Return the correct user ID once ownership tracking is implemented.
-        Ok(Uid::new_root())
+        Ok(self.owner_uid)
     }
 
-    /// Returns whether this namespace is the same as, or an ancestor of, the other namespace.
+    /// Returns whether this namespace is the same as, or an ancestor of, the
+    /// other namespace, by walking the other's parent chain.
     pub fn is_same_or_ancestor_of(self: &Arc<Self>, other: &Arc<Self>) -> bool {
-        // FIXME: Creating new user namespaces is not yet supported,
-        // so we simply check pointer equality.
-        // Once user namespace creation is implemented,
-        // this should walk up the ancestor chain to verify
-        // whether `self` is an ancestor of `other`.
-        Arc::ptr_eq(self, other)
+        let mut current = other.clone();
+        loop {
+            if Arc::ptr_eq(self, &current) {
+                return true;
+            }
+            let Some(parent) = current.parent.clone() else {
+                return false;
+            };
+            current = parent;
+        }
     }
 }
 

@@ -11,7 +11,7 @@ use ostd::{
 };
 
 use super::{
-    Credentials, Pid, Process, pid_table,
+    Credentials, Pid, Process, Uid, pid_table,
     posix_thread::{AsPosixThread, PosixThreadBuilder},
     rlimit::ResourceLimits,
     signal::{constants::SIGCHLD, sig_disposition::SigDispositions, sig_num::SigNum},
@@ -555,7 +555,7 @@ fn clone_child_process(
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
 
     // Clone the namespaces
-    let child_user_ns = clone_user_ns(clone_flags, thread_local)?;
+    let child_user_ns = clone_user_ns(clone_flags, thread_local, posix_thread.credentials().euid())?;
     let child_ns_proxy = clone_ns_proxy(
         thread_local.borrow_ns_proxy().unwrap(),
         &child_user_ns,
@@ -859,12 +859,17 @@ fn clone_pidfd(
 fn clone_user_ns(
     clone_flags: CloneFlags,
     thread_local: &ThreadLocal,
+    owner_uid: Uid,
 ) -> Result<Arc<UserNamespace>> {
     if clone_flags.contains(CloneFlags::CLONE_NEWUSER) {
-        return_errno_with_message!(
-            Errno::EINVAL,
-            "cloning a new user namespace is not supported"
-        );
+        // Create a real child user namespace owned by the caller. Per Linux the
+        // creator would gain a full capability set *within* the new namespace;
+        // astrokube Stage 1 does NOT widen any capability (check_cap is still
+        // global), so this grants no new privilege — it only establishes the
+        // namespace and its parent/owner tracking. ID mapping and ns-aware
+        // capability enforcement are later stages.
+        let parent = thread_local.borrow_user_ns();
+        UserNamespace::new_child(&parent, owner_uid)
     } else {
         Ok(thread_local.borrow_user_ns().clone())
     }
