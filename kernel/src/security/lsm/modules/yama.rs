@@ -6,7 +6,7 @@ use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 
 use super::super::{
     LsmFlags, LsmModule,
-    hooks::{AlienAccessContext, LsmAlienAccessHook},
+    hooks::{AlienAccessContext, LsmAlienAccessHook, LsmSignalAccessHook},
 };
 use crate::{
     prelude::*,
@@ -48,6 +48,9 @@ impl LsmAlienAccessHook for YamaLsm {
         Ok(())
     }
 }
+
+// Yama does not gate signals; it uses the default (allow) hook.
+impl LsmSignalAccessHook for YamaLsm {}
 
 impl LsmModule for YamaLsm {
     fn name(&self) -> &'static str {

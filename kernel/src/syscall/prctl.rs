@@ -192,6 +192,29 @@ pub fn sys_prctl(
             }
             crate::net::iface::mark_bridge_uplink(bridge_index);
         }
+        PrctlCmd::PR_ASTROKUBE_SETTENANT(tenant) => {
+            // Assign the calling thread's astromac tenant label (multi-tenant
+            // MAC). Requires CAP_SYS_ADMIN — only a pod launcher labels pods.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "setting an astromac tenant label requires CAP_SYS_ADMIN"
+                );
+            }
+            ctx.posix_thread.set_mac_tenant(tenant);
+        }
+        PrctlCmd::PR_ASTROKUBE_MAC_MODE(mode) => {
+            // Set the global astromac enforcement mode. set_mode performs its own
+            // CAP_SYS_ADMIN check against the init user namespace.
+            let mode = crate::security::lsm::astromac::MacMode::try_from(mode)
+                .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astromac mode"))?;
+            crate::security::lsm::astromac::set_mode(mode)?;
+        }
         PrctlCmd::PR_ASTROKUBE_ACPI => {
             // Arm the ACPI power-button monitor so an orderly host poweroff
             // (QEMU `system_powerdown` / virsh shutdown) is delivered to PID 1
@@ -254,6 +277,10 @@ const PR_ASTROKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
 /// orderly host poweroff is delivered to PID 1 as SIGINT for a graceful node
 /// drain. Called once by the init after the node is up; takes no arguments.
 const PR_ASTROKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
+/// astrokube: set the calling thread's astromac tenant label (arg2 = tenant id).
+const PR_ASTROKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
+/// astrokube: set the global astromac mode (arg2 = MacMode: 0/1/2).
+const PR_ASTROKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -288,6 +315,8 @@ pub enum PrctlCmd {
         bridge_index: u32,
     },
     PR_ASTROKUBE_ACPI,
+    PR_ASTROKUBE_SETTENANT(u32),
+    PR_ASTROKUBE_MAC_MODE(u32),
 }
 
 #[repr(u64)]
@@ -346,6 +375,8 @@ impl PrctlCmd {
                 bridge_index: arg2 as u32,
             }),
             PR_ASTROKUBE_ACPI => Ok(PrctlCmd::PR_ASTROKUBE_ACPI),
+            PR_ASTROKUBE_SETTENANT => Ok(PrctlCmd::PR_ASTROKUBE_SETTENANT(arg2 as u32)),
+            PR_ASTROKUBE_MAC_MODE => Ok(PrctlCmd::PR_ASTROKUBE_MAC_MODE(arg2 as u32)),
             _ => {
                 debug!("prctl cmd number: {}", option);
                 return_errno_with_message!(Errno::EINVAL, "unsupported prctl command");

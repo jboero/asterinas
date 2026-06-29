@@ -24,6 +24,7 @@
 //! fully describes the enabled stack. If neither parameter is specified, the
 //! default LSM stack is used.
 
+pub mod astromac;
 pub mod yama;
 
 use spin::Once;
@@ -38,10 +39,13 @@ aster_cmdline::define_kv_param!("lsm", LSM_PARAM);
 aster_cmdline::define_kv_param!("security", LEGACY_SECURITY_PARAM);
 
 /// All LSM modules compiled into the kernel.
-static ALL_MODULES: [&'static dyn LsmModule; 1] = [&yama::YAMA_LSM];
+static ALL_MODULES: [&'static dyn LsmModule; 2] = [&yama::YAMA_LSM, &astromac::ASTROMAC_LSM];
 
-/// The fallback LSM stack used when no boot-time selector is specified.
-pub(super) static DEFAULT_MODULES: [&'static dyn LsmModule; 1] = [&yama::YAMA_LSM];
+/// The fallback LSM stack used when no boot-time selector is specified. astromac
+/// is on by default but starts permissive (and is a no-op for unlabeled
+/// processes), so it does not affect existing Kubernetes workloads.
+pub(super) static DEFAULT_MODULES: [&'static dyn LsmModule; 2] =
+    [&yama::YAMA_LSM, &astromac::ASTROMAC_LSM];
 
 static ALL_MODULES_BY_NAME: Once<BTreeMap<&'static str, &'static dyn LsmModule>> = Once::new();
 static ACTIVE_MODULES: Once<Box<[&'static dyn LsmModule]>> = Once::new();

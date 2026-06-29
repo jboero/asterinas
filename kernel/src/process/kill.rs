@@ -164,6 +164,17 @@ fn check_signal_perm(target: &PosixThread, ctx: &Context, signum: Option<SigNum>
         return Ok(());
     }
 
+    // Mandatory access control (astromac): a cross-tenant signal may be denied
+    // regardless of the discretionary checks below. This is checked first so MAC
+    // can override DAC, as a mandatory policy must. It is a no-op for unlabeled
+    // (tenant 0) processes, which is every process on an unmodified node.
+    crate::security::lsm::hooks::on_signal_access(
+        &crate::security::lsm::hooks::SignalAccessContext::new(
+            ctx.posix_thread.mac_tenant(),
+            target.mac_tenant(),
+        ),
+    )?;
+
     let current_cred = ctx.posix_thread.credentials();
     let target_cred = target.credentials();
     if current_cred.euid() == target_cred.suid()
