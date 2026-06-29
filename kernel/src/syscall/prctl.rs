@@ -4,6 +4,7 @@ use ostd::mm::VmIo;
 
 use super::SyscallReturn;
 use crate::{
+    fs::file::file_table::{RawFileDesc, get_file_fast},
     prelude::*,
     process::{
         credentials::{SecureBits, capabilities::CapSet},
@@ -215,6 +216,31 @@ pub fn sys_prctl(
                 .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astromac mode"))?;
             crate::security::lsm::astromac::set_mode(mode)?;
         }
+        PrctlCmd::PR_ASTROKUBE_LABEL_FD { fd, tenant } => {
+            // Assign (or clear, with tenant 0) the astromac tenant label of the
+            // file referred to by `fd`. Requires CAP_SYS_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "labeling a file requires CAP_SYS_ADMIN"
+                );
+            }
+            let metadata = {
+                let mut file_table = ctx.thread_local.borrow_file_table_mut();
+                let file = get_file_fast!(&mut file_table, (fd as RawFileDesc).try_into()?);
+                file.path().metadata()
+            };
+            crate::security::lsm::astromac::label_file(
+                metadata.container_dev_id.as_encoded_u64(),
+                metadata.ino,
+                tenant,
+            );
+        }
         PrctlCmd::PR_ASTROKUBE_ACPI => {
             // Arm the ACPI power-button monitor so an orderly host poweroff
             // (QEMU `system_powerdown` / virsh shutdown) is delivered to PID 1
@@ -281,6 +307,8 @@ const PR_ASTROKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
 const PR_ASTROKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
 /// astrokube: set the global astromac mode (arg2 = MacMode: 0/1/2).
 const PR_ASTROKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
+/// astrokube: label the file at fd (arg2 = fd) with a tenant (arg3 = tenant).
+const PR_ASTROKUBE_LABEL_FD: i32 = 0x4b55_464c; // "KUFL"
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -317,6 +345,7 @@ pub enum PrctlCmd {
     PR_ASTROKUBE_ACPI,
     PR_ASTROKUBE_SETTENANT(u32),
     PR_ASTROKUBE_MAC_MODE(u32),
+    PR_ASTROKUBE_LABEL_FD { fd: u32, tenant: u32 },
 }
 
 #[repr(u64)]
@@ -377,6 +406,10 @@ impl PrctlCmd {
             PR_ASTROKUBE_ACPI => Ok(PrctlCmd::PR_ASTROKUBE_ACPI),
             PR_ASTROKUBE_SETTENANT => Ok(PrctlCmd::PR_ASTROKUBE_SETTENANT(arg2 as u32)),
             PR_ASTROKUBE_MAC_MODE => Ok(PrctlCmd::PR_ASTROKUBE_MAC_MODE(arg2 as u32)),
+            PR_ASTROKUBE_LABEL_FD => Ok(PrctlCmd::PR_ASTROKUBE_LABEL_FD {
+                fd: arg2 as u32,
+                tenant: arg3 as u32,
+            }),
             _ => {
                 debug!("prctl cmd number: {}", option);
                 return_errno_with_message!(Errno::EINVAL, "unsupported prctl command");

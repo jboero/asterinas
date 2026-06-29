@@ -20,11 +20,17 @@
 //! different tenant (the cross-tenant isolation primitive). The framework is
 //! built to grow more hooks (file, socket) over time.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use ostd::sync::SpinLock;
 
 use super::super::{
     LsmFlags, LsmModule,
-    hooks::{LsmAlienAccessHook, LsmSignalAccessHook, SignalAccessContext},
+    hooks::{
+        FileAccessContext, LsmAlienAccessHook, LsmFileAccessHook, LsmSignalAccessHook,
+        SignalAccessContext,
+    },
 };
 use crate::{
     prelude::*,
@@ -92,6 +98,74 @@ impl LsmSignalAccessHook for AstroMacLsm {
                 warn!(
                     "[astromac] PERMISSIVE: would deny cross-tenant signal (sender tenant {}, target tenant {})",
                     sender, target
+                );
+                Ok(())
+            }
+            MacMode::Disabled => Ok(()),
+        }
+    }
+}
+
+// --- Object (file) tenant labels ---
+//
+// Files are labeled by their `(dev, ino)` identity in an in-kernel table. This
+// keeps file labeling independent of any particular filesystem's xattr support
+// and avoids touching every inode. The fast-path check is a single atomic load
+// of the label count, so an unlabeled system (every unmodified node) pays almost
+// nothing on the file-access hot path.
+
+static FILE_LABELS: SpinLock<BTreeMap<(u64, u64), u32>> = SpinLock::new(BTreeMap::new());
+static FILE_LABEL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether any file carries a tenant label. The file-access hot path checks this
+/// first and skips all work when it is false (the default).
+pub fn has_file_labels() -> bool {
+    FILE_LABEL_COUNT.load(Ordering::Relaxed) != 0
+}
+
+/// Labels (or, with `tenant == 0`, unlabels) a file identified by `(dev, ino)`.
+pub fn label_file(dev: u64, ino: u64, tenant: u32) {
+    let mut labels = FILE_LABELS.lock();
+    if tenant == 0 {
+        if labels.remove(&(dev, ino)).is_some() {
+            FILE_LABEL_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+    } else if labels.insert((dev, ino), tenant).is_none() {
+        FILE_LABEL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Returns the tenant label of a file, or 0 if it is unlabeled.
+fn file_tenant(dev: u64, ino: u64) -> u32 {
+    FILE_LABELS.lock().get(&(dev, ino)).copied().unwrap_or(0)
+}
+
+impl LsmFileAccessHook for AstroMacLsm {
+    fn on_file_access(&self, context: &FileAccessContext) -> Result<()> {
+        let mode = mode();
+        if mode == MacMode::Disabled {
+            return Ok(());
+        }
+
+        let subject = context.subject_tenant();
+        let object = file_tenant(context.dev(), context.ino());
+
+        // Tenant 0 is unconfined; only two different non-zero tenants conflict.
+        let cross_tenant = subject != 0 && object != 0 && subject != object;
+        if !cross_tenant {
+            return Ok(());
+        }
+
+        match mode {
+            MacMode::Enforcing => {
+                return_errno_with_message!(Errno::EPERM, "astromac: cross-tenant file access denied");
+            }
+            MacMode::Permissive => {
+                warn!(
+                    "[astromac] PERMISSIVE: would deny cross-tenant file access (subject tenant {}, file tenant {}, ino {})",
+                    subject,
+                    object,
+                    context.ino()
                 );
                 Ok(())
             }

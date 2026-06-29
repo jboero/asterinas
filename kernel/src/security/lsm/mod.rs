@@ -18,10 +18,10 @@ pub mod yama {
 }
 
 pub mod astromac {
-    pub use super::modules::astromac::{MacMode, set_mode};
+    pub use super::modules::astromac::{MacMode, has_file_labels, label_file, set_mode};
 }
 
-use self::hooks::{LsmAlienAccessHook, LsmSignalAccessHook};
+use self::hooks::{LsmAlienAccessHook, LsmFileAccessHook, LsmSignalAccessHook};
 use crate::prelude::*;
 
 bitflags! {
@@ -35,7 +35,7 @@ bitflags! {
 }
 
 /// The common interface for built-in LSM modules.
-trait LsmModule: LsmAlienAccessHook + LsmSignalAccessHook + Sync {
+trait LsmModule: LsmAlienAccessHook + LsmSignalAccessHook + LsmFileAccessHook + Sync {
     /// Returns the module name.
     fn name(&self) -> &'static str;
 
