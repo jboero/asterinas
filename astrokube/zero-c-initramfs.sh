@@ -24,6 +24,13 @@ CPIO="$BUILD/initramfs.cpio.gz"
 WORK=$(mktemp -d /tmp/astrokube-zeroc.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
+# The finished image is SELF-CONTAINED: the static container runtime and the
+# side-loaded image are baked into the initramfs (they used to be delivered over
+# a virtio-fs share during development). Source them from the static-bins dir
+# (containerd + shim, built by build-containerd-merged.sh) and the hello image.
+STATIC_BINS=${STATIC_BINS:-/tmp/claude-1000/-home-jboero-code-asterinas-experiment/cda31c84-d1d7-4b29-b835-799b7fecd452/scratchpad/static-bins}
+HELLO_TAR=${HELLO_TAR:-/tmp/astrokube-vfs-zeroc/hello.tar}
+
 # INIT_BIN lets us drop in a pre-built binary — e.g. the COMBINED zero-C kubelet
 # (real upstream kubelet + our init), built by build-zeroc-kubelet.sh. Otherwise
 # build the lightweight standalone init/node-agent from this module.
@@ -46,6 +53,28 @@ mkdir -p "$WORK/root"
 echo "==> swapping in fresh static init (single binary, no duplicate)"
 install -m 0755 "$WORK/init-bin" "$WORK/root/usr/bin/kubelet"
 rm -f "$WORK/root/usr/bin/astrokube-init"
+
+# Bake the static container runtime + image into the initramfs so the image is
+# self-contained (no virtio-fs share). containerd and ctr are one binary (hard
+# link); the shim is its own. All are static/CGO-free, so they survive the
+# dynamic-binary purge below and the zero-C verification.
+echo "==> baking the static container runtime into the initramfs (self-contained)"
+for b in containerd containerd-shim-runc-v2; do
+  [ -f "$STATIC_BINS/$b" ] || { echo "    !! missing $STATIC_BINS/$b (run build-containerd-merged.sh)"; exit 1; }
+  install -m 0755 "$STATIC_BINS/$b" "$WORK/root/usr/bin/$b"
+done
+# ctr is the same multi-call binary as containerd; a relative SYMLINK (not a hard
+# link — Asterinas' cpio extractor doesn't reconstruct hard links, leaving an
+# empty file) keeps argv[0] dispatch working (exec'ing /usr/bin/ctr keeps
+# argv[0]="ctr").
+ln -sf containerd "$WORK/root/usr/bin/ctr"
+mkdir -p "$WORK/root/usr/share/astrokube"
+if [ -f "$HELLO_TAR" ]; then
+  install -m 0644 "$HELLO_TAR" "$WORK/root/usr/share/astrokube/hello.tar"
+  echo "    image: usr/share/astrokube/hello.tar"
+else
+  echo "    !! missing hello image $HELLO_TAR (run build-hello-image.sh)"; exit 1
+fi
 
 echo "==> removing the C runtime (glibc closure) and any dynamic binaries"
 rm -rf "$WORK/root/lib64" "$WORK/root/lib"
