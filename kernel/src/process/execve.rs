@@ -12,7 +12,10 @@ use ostd::{
 
 use super::process_vm::activate_vmar;
 use crate::{
-    fs::vfs::{inode::Inode, path::Path},
+    fs::vfs::{
+        inode::Inode,
+        path::{Path, PerMountFlags},
+    },
     prelude::*,
     process::{
         ContextUnshareAdminApi, Credentials, Process, pid_table,
@@ -47,6 +50,14 @@ pub fn do_execve(
     // of all strings to enforce a sensible overall limit.
     let argv = read_cstring_vec(argv_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
     let envp = read_cstring_vec(envp_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
+
+    // Mount security: refuse to execute a binary from a `noexec` mount. This,
+    // together with the `nosuid` enforcement below, is what makes a writable
+    // container volume safe — code dropped there cannot run, and a setuid binary
+    // there cannot escalate.
+    if elf_file.mount_flags().contains(PerMountFlags::NOEXEC) {
+        return_errno_with_message!(Errno::EACCES, "execute denied: noexec mount");
+    }
 
     let fs_ref = ctx.thread_local.borrow_fs();
     let path_resolver = fs_ref.resolver().read();
@@ -169,7 +180,10 @@ fn do_execve_no_return(
     // This prevents race conditions when checking access permissions while opening
     // `/proc/[pid]/mem` or `/proc/[pid]/maps`.
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
-    apply_caps_from_exec(process, ctx.credentials_mut(), elf_file.inode())?;
+    // A `nosuid` mount disables the set-uid/set-gid bits, so a setuid-root binary
+    // placed in a container volume cannot escalate.
+    let nosuid = elf_file.mount_flags().contains(PerMountFlags::NOSUID);
+    apply_caps_from_exec(process, ctx.credentials_mut(), elf_file.inode(), nosuid)?;
     drop(vmar_guard);
     drop(old_vmar);
 
@@ -311,9 +325,10 @@ fn apply_caps_from_exec(
     process: &Process,
     credentials: Credentials<ReadWriteOp>,
     elf_inode: &Arc<dyn Inode>,
+    nosuid: bool,
 ) -> Result<()> {
-    set_uid_from_elf(process, &credentials, elf_inode)?;
-    set_gid_from_elf(process, &credentials, elf_inode)?;
+    set_uid_from_elf(process, &credentials, elf_inode, nosuid)?;
+    set_gid_from_elf(process, &credentials, elf_inode, nosuid)?;
     credentials.set_keep_capabilities(false)?;
 
     Ok(())
@@ -321,14 +336,15 @@ fn apply_caps_from_exec(
 
 /// Sets the UID in the credentials according to the ELF inode.
 ///
-/// If the ELF inode has the `set_uid` bit, the effective UID is set to the same value as the ELF
-/// inode's UID.
+/// If the ELF inode has the `set_uid` bit (and the mount is not `nosuid`), the
+/// effective UID is set to the same value as the ELF inode's UID.
 fn set_uid_from_elf(
     current: &Process,
     credentials: &Credentials<ReadWriteOp>,
     elf_inode: &Arc<dyn Inode>,
+    nosuid: bool,
 ) -> Result<()> {
-    if elf_inode.mode()?.has_set_uid() {
+    if !nosuid && elf_inode.mode()?.has_set_uid() {
         let uid = elf_inode.owner()?;
         credentials.set_euid(uid);
 
@@ -342,14 +358,15 @@ fn set_uid_from_elf(
 
 /// Sets the GID in the credentials according to the ELF inode.
 ///
-/// If the ELF inode has the `set_gid` bit, the effective GID is set to the same value as the ELF
-/// inode's GID.
+/// If the ELF inode has the `set_gid` bit (and the mount is not `nosuid`), the
+/// effective GID is set to the same value as the ELF inode's GID.
 fn set_gid_from_elf(
     current: &Process,
     credentials: &Credentials<ReadWriteOp>,
     elf_inode: &Arc<dyn Inode>,
+    nosuid: bool,
 ) -> Result<()> {
-    if elf_inode.mode()?.has_set_gid() {
+    if !nosuid && elf_inode.mode()?.has_set_gid() {
         let gid = elf_inode.group()?;
         credentials.set_egid(gid);
 
