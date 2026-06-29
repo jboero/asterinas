@@ -216,6 +216,22 @@ pub fn sys_prctl(
                 .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astromac mode"))?;
             crate::security::lsm::astromac::set_mode(mode)?;
         }
+        PrctlCmd::PR_ASTROKUBE_LABEL_IP { ipv4, tenant } => {
+            // Assign (or clear, with tenant 0) the astromac tenant label of an
+            // IPv4 endpoint. Requires CAP_SYS_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "labeling an IP requires CAP_SYS_ADMIN"
+                );
+            }
+            crate::security::lsm::astromac::label_ip(ipv4, tenant);
+        }
         PrctlCmd::PR_ASTROKUBE_LABEL_FD { fd, tenant } => {
             // Assign (or clear, with tenant 0) the astromac tenant label of the
             // file referred to by `fd`. Requires CAP_SYS_ADMIN.
@@ -309,6 +325,8 @@ const PR_ASTROKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
 const PR_ASTROKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
 /// astrokube: label the file at fd (arg2 = fd) with a tenant (arg3 = tenant).
 const PR_ASTROKUBE_LABEL_FD: i32 = 0x4b55_464c; // "KUFL"
+/// astrokube: label an IPv4 endpoint (arg2 = ip, be u32) with a tenant (arg3).
+const PR_ASTROKUBE_LABEL_IP: i32 = 0x4b55_4950; // "KUIP"
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -346,6 +364,7 @@ pub enum PrctlCmd {
     PR_ASTROKUBE_SETTENANT(u32),
     PR_ASTROKUBE_MAC_MODE(u32),
     PR_ASTROKUBE_LABEL_FD { fd: u32, tenant: u32 },
+    PR_ASTROKUBE_LABEL_IP { ipv4: u32, tenant: u32 },
 }
 
 #[repr(u64)]
@@ -408,6 +427,10 @@ impl PrctlCmd {
             PR_ASTROKUBE_MAC_MODE => Ok(PrctlCmd::PR_ASTROKUBE_MAC_MODE(arg2 as u32)),
             PR_ASTROKUBE_LABEL_FD => Ok(PrctlCmd::PR_ASTROKUBE_LABEL_FD {
                 fd: arg2 as u32,
+                tenant: arg3 as u32,
+            }),
+            PR_ASTROKUBE_LABEL_IP => Ok(PrctlCmd::PR_ASTROKUBE_LABEL_IP {
+                ipv4: arg2 as u32,
                 tenant: arg3 as u32,
             }),
             _ => {

@@ -29,7 +29,7 @@ use super::super::{
     LsmFlags, LsmModule,
     hooks::{
         FileAccessContext, LsmAlienAccessHook, LsmFileAccessHook, LsmSignalAccessHook,
-        SignalAccessContext,
+        LsmSocketConnectHook, SignalAccessContext, SocketConnectContext,
     },
 };
 use crate::{
@@ -166,6 +166,71 @@ impl LsmFileAccessHook for AstroMacLsm {
                     subject,
                     object,
                     context.ino()
+                );
+                Ok(())
+            }
+            MacMode::Disabled => Ok(()),
+        }
+    }
+}
+
+// --- Endpoint (IPv4) tenant labels ---
+//
+// Network endpoints are labeled by their IPv4 address (network byte order as a
+// `u32`). A labeled subject connecting to a differently-labeled address is a
+// cross-tenant network access. Same fast-path discipline as file labels.
+
+static IP_LABELS: SpinLock<BTreeMap<u32, u32>> = SpinLock::new(BTreeMap::new());
+static IP_LABEL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether any IPv4 endpoint carries a tenant label (socket-connect fast path).
+pub fn has_ip_labels() -> bool {
+    IP_LABEL_COUNT.load(Ordering::Relaxed) != 0
+}
+
+/// Labels (or, with `tenant == 0`, unlabels) an IPv4 endpoint. `ipv4` is
+/// `u32::from_be_bytes(octets)`.
+pub fn label_ip(ipv4: u32, tenant: u32) {
+    let mut labels = IP_LABELS.lock();
+    if tenant == 0 {
+        if labels.remove(&ipv4).is_some() {
+            IP_LABEL_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+    } else if labels.insert(ipv4, tenant).is_none() {
+        IP_LABEL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn ip_tenant(ipv4: u32) -> u32 {
+    IP_LABELS.lock().get(&ipv4).copied().unwrap_or(0)
+}
+
+impl LsmSocketConnectHook for AstroMacLsm {
+    fn on_socket_connect(&self, context: &SocketConnectContext) -> Result<()> {
+        let mode = mode();
+        if mode == MacMode::Disabled {
+            return Ok(());
+        }
+
+        let subject = context.subject_tenant();
+        let object = ip_tenant(context.dst_ipv4());
+
+        let cross_tenant = subject != 0 && object != 0 && subject != object;
+        if !cross_tenant {
+            return Ok(());
+        }
+
+        match mode {
+            MacMode::Enforcing => {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "astromac: cross-tenant network connect denied"
+                );
+            }
+            MacMode::Permissive => {
+                warn!(
+                    "[astromac] PERMISSIVE: would deny cross-tenant connect (subject tenant {}, dst tenant {})",
+                    subject, object
                 );
                 Ok(())
             }

@@ -5,11 +5,13 @@
 mod alien_access;
 mod file_access;
 mod signal_access;
+mod socket_connect;
 
 pub use self::{
     alien_access::{AlienAccessContext, on_alien_access},
     file_access::{FileAccessContext, on_file_access},
     signal_access::{SignalAccessContext, on_signal_access},
+    socket_connect::{SocketConnectContext, on_socket_connect},
 };
 use crate::prelude::*;
 
@@ -30,6 +32,13 @@ pub(super) trait LsmSignalAccessHook: Sync {
 pub(super) trait LsmFileAccessHook: Sync {
     /// Handles a file-access attempt.
     fn on_file_access(&self, _context: &FileAccessContext) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub(super) trait LsmSocketConnectHook: Sync {
+    /// Handles a socket-connect attempt.
+    fn on_socket_connect(&self, _context: &SocketConnectContext) -> Result<()> {
         Ok(())
     }
 }
