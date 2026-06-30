@@ -76,6 +76,12 @@ else
   echo "    !! missing hello image $HELLO_TAR (run build-hello-image.sh)"; exit 1
 fi
 
+# Ship the documented default /etc/fstab (operator-editable table of extra
+# mounts; the init reads it after the essential pseudo-filesystems).
+HERE=$(cd "$(dirname "$0")" && pwd)
+install -m 0644 "$HERE/fstab.default" "$WORK/root/etc/fstab"
+echo "    fstab: etc/fstab (default template)"
+
 echo "==> removing the C runtime (glibc closure) and any dynamic binaries"
 rm -rf "$WORK/root/lib64" "$WORK/root/lib"
 # Walk every regular file; drop anything that is a dynamically-linked ELF or a
