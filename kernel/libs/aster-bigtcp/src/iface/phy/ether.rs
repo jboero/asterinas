@@ -57,7 +57,14 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
             interface
         });
 
-        let common = IfaceCommon::new(name, InterfaceType::ETHER, flags, interface, sched_poll);
+        let common = IfaceCommon::new(
+            name,
+            InterfaceType::ETHER,
+            flags,
+            Some(ether_addr.0),
+            interface,
+            sched_poll,
+        );
 
         Arc::new(Self {
             driver,

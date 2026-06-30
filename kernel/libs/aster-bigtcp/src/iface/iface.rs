@@ -91,6 +91,12 @@ impl<E: Ext> dyn Iface<E> {
         self.common().ipv4_addr()
     }
 
+    /// Gets the L2 (MAC) hardware address of the iface, if it has one (Ethernet
+    /// interfaces do; loopback does not).
+    pub fn mac(&self) -> Option<[u8; 6]> {
+        self.common().mac()
+    }
+
     /// Gets the IPv6 address of the iface, if any.
     pub fn ipv6_addr(&self) -> Option<Ipv6Address> {
         self.common().ipv6_addr()

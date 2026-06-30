@@ -118,6 +118,8 @@ pub struct VethPeer {
 
 #[derive(Debug)]
 pub enum LinkAttr {
+    /// `IFLA_ADDRESS`: the interface's L2 (MAC) hardware address.
+    Address([u8; 6]),
     Name(CString),
     Mtu(u32),
     TxqLen(u32),
@@ -136,6 +138,7 @@ pub enum LinkAttr {
 impl LinkAttr {
     fn class(&self) -> LinkAttrClass {
         match self {
+            LinkAttr::Address(_) => LinkAttrClass::ADDRESS,
             LinkAttr::Name(_) => LinkAttrClass::IFNAME,
             LinkAttr::Mtu(_) => LinkAttrClass::MTU,
             LinkAttr::TxqLen(_) => LinkAttrClass::TXQLEN,
@@ -156,6 +159,7 @@ impl Attribute for LinkAttr {
 
     fn payload_as_bytes(&self) -> &[u8] {
         match self {
+            LinkAttr::Address(mac) => mac.as_slice(),
             LinkAttr::Name(name) => name.as_bytes_with_nul(),
             LinkAttr::Mtu(mtu) => mtu.as_bytes(),
             LinkAttr::TxqLen(txq_len) => txq_len.as_bytes(),

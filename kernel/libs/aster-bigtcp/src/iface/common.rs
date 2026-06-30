@@ -40,6 +40,10 @@ pub struct IfaceCommon<E: Ext> {
     name: String,
     type_: InterfaceType,
     flags: InterfaceFlags,
+    /// The L2 (MAC) address for Ethernet-medium interfaces; `None` for IP-medium
+    /// ones (loopback, veth, bridge). Stored explicitly because smoltcp's
+    /// `Interface::hardware_addr()` panics on non-Ethernet media.
+    mac: Option<[u8; 6]>,
 
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
@@ -84,6 +88,7 @@ impl<E: Ext> IfaceCommon<E> {
         name: String,
         type_: InterfaceType,
         flags: InterfaceFlags,
+        mac: Option<[u8; 6]>,
         interface: smoltcp::iface::Interface,
         sched_poll: E::ScheduleNextPoll,
     ) -> Self {
@@ -94,6 +99,7 @@ impl<E: Ext> IfaceCommon<E> {
             name,
             type_,
             flags,
+            mac,
             interface: SpinLock::new(PollableIface::new(interface)),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
@@ -119,6 +125,10 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn ipv4_addr(&self) -> Option<Ipv4Address> {
         self.interface.lock().ipv4_addr()
+    }
+
+    pub(super) fn mac(&self) -> Option<[u8; 6]> {
+        self.mac
     }
 
     pub(super) fn ipv6_addr(&self) -> Option<Ipv6Address> {

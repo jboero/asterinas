@@ -307,10 +307,15 @@ fn iface_to_new_link(request_header: &CMsgSegHdr, iface: &Arc<Iface>) -> LinkSeg
         flags: iface.flags(),
     };
 
-    let attrs = vec![
+    let mut attrs = vec![
         LinkAttr::Name(CString::new(iface.name()).unwrap()),
         LinkAttr::Mtu(iface.mtu() as u32),
     ];
+    // IFLA_ADDRESS: the L2 MAC, so userspace (e.g. a DHCP client building its
+    // chaddr) can read the interface's hardware address. Loopback has none.
+    if let Some(mac) = iface.mac() {
+        attrs.push(LinkAttr::Address(mac));
+    }
 
     LinkSegment::new(header, link_message, attrs)
 }
