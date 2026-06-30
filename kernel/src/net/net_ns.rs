@@ -194,7 +194,7 @@ impl NetNamespace {
     /// Returns this namespace's default interface for external traffic. The
     /// initial namespace prefers virtio over loopback; a created namespace has
     /// only loopback.
-    fn default_iface(&self) -> Arc<Iface> {
+    pub(in crate::net) fn default_iface(&self) -> Arc<Iface> {
         if self.is_init {
             iface::virtio_iface()
                 .cloned()

@@ -19,13 +19,24 @@ pub(super) fn resolve_bind_iface_and_config(
 
     // Resolve the interface within the calling thread's network namespace, so a
     // socket binds to the loopback (and other interfaces) of its own namespace.
-    let iface = match NetNamespace::current().iface_to_bind(&endpoint.addr) {
-        Some(iface) => iface,
-        None => {
-            return_errno_with_message!(
-                Errno::EADDRNOTAVAIL,
-                "the address is not available from the local machine"
-            );
+    let iface = if endpoint.addr.is_unspecified() {
+        // A wildcard bind (`0.0.0.0:<port>` / `[::]:<port>`) names no specific
+        // local address, so bind it on the default egress interface. This lets a
+        // client receive on a fixed port BEFORE the interface has an address —
+        // e.g. a DHCP client binding `0.0.0.0:68` to receive broadcast replies.
+        // (Binds the default interface, not literally every interface; sufficient
+        // for the single-egress-NIC node and avoids the EADDRNOTAVAIL that the
+        // address-owning lookup below would otherwise return for 0.0.0.0.)
+        NetNamespace::current().default_iface()
+    } else {
+        match NetNamespace::current().iface_to_bind(&endpoint.addr) {
+            Some(iface) => iface,
+            None => {
+                return_errno_with_message!(
+                    Errno::EADDRNOTAVAIL,
+                    "the address is not available from the local machine"
+                );
+            }
         }
     };
 
