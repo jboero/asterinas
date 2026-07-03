@@ -6,7 +6,7 @@
 //! `iptables-nft` issue so they run without error against an (empty) ruleset,
 //! and acknowledges rule-programming batches. It does not yet enforce any
 //! rules — translating the nftables payloads into the native NAT datapath
-//! (`aster_bigtcp::nat::nat_table()`, today driven by the `PR_ASTROKUBE_*`
+//! (`aster_bigtcp::nat::nat_table()`, today driven by the `PR_ASTERKUBE_*`
 //! prctls) is the next step.
 
 use super::message::{NfnlMessage, NfnlSegment, is_dump_request, wants_ack};

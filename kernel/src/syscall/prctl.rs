@@ -148,7 +148,7 @@ pub fn sys_prctl(
                 _ => return_errno_with_message!(Errno::EINVAL, "unsupported seccomp mode"),
             }
         }
-        PrctlCmd::PR_ASTROKUBE_DNAT {
+        PrctlCmd::PR_ASTERKUBE_DNAT {
             vip,
             backend,
             ports,
@@ -177,7 +177,7 @@ pub fn sys_prctl(
                 (ports & 0xffff) as u16,
             );
         }
-        PrctlCmd::PR_ASTROKUBE_MASQ { bridge_index } => {
+        PrctlCmd::PR_ASTERKUBE_MASQ { bridge_index } => {
             // Temporary scaffolding to mark a bridge as a masquerade uplink.
             // Requires CAP_NET_ADMIN.
             if !ctx
@@ -193,7 +193,7 @@ pub fn sys_prctl(
             }
             crate::net::iface::mark_bridge_uplink(bridge_index);
         }
-        PrctlCmd::PR_ASTROKUBE_SETTENANT(tenant) => {
+        PrctlCmd::PR_ASTERKUBE_SETTENANT(tenant) => {
             // Assign the calling thread's astromac tenant label (multi-tenant
             // MAC). Requires CAP_SYS_ADMIN — only a pod launcher labels pods.
             if !ctx
@@ -209,14 +209,14 @@ pub fn sys_prctl(
             }
             ctx.posix_thread.set_mac_tenant(tenant);
         }
-        PrctlCmd::PR_ASTROKUBE_MAC_MODE(mode) => {
+        PrctlCmd::PR_ASTERKUBE_MAC_MODE(mode) => {
             // Set the global astromac enforcement mode. set_mode performs its own
             // CAP_SYS_ADMIN check against the init user namespace.
             let mode = crate::security::lsm::astromac::MacMode::try_from(mode)
                 .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astromac mode"))?;
             crate::security::lsm::astromac::set_mode(mode)?;
         }
-        PrctlCmd::PR_ASTROKUBE_LABEL_IP { ipv4, tenant } => {
+        PrctlCmd::PR_ASTERKUBE_LABEL_IP { ipv4, tenant } => {
             // Assign (or clear, with tenant 0) the astromac tenant label of an
             // IPv4 endpoint. Requires CAP_SYS_ADMIN.
             if !ctx
@@ -232,7 +232,7 @@ pub fn sys_prctl(
             }
             crate::security::lsm::astromac::label_ip(ipv4, tenant);
         }
-        PrctlCmd::PR_ASTROKUBE_LABEL_FD { fd, tenant } => {
+        PrctlCmd::PR_ASTERKUBE_LABEL_FD { fd, tenant } => {
             // Assign (or clear, with tenant 0) the astromac tenant label of the
             // file referred to by `fd`. Requires CAP_SYS_ADMIN.
             if !ctx
@@ -257,7 +257,7 @@ pub fn sys_prctl(
                 tenant,
             );
         }
-        PrctlCmd::PR_ASTROKUBE_ACPI => {
+        PrctlCmd::PR_ASTERKUBE_ACPI => {
             // Arm the ACPI power-button monitor so an orderly host poweroff
             // (QEMU `system_powerdown` / virsh shutdown) is delivered to PID 1
             // as SIGINT for graceful node drain. Spawning the monitor thread
@@ -308,25 +308,25 @@ const PR_GET_NO_NEW_PRIVS: i32 = 39;
 /// `arg4` packs `(vport << 16) | bport`, `arg5` is the IP protocol. Temporary
 /// scaffolding that drives the kernel NAT datapath until the nftables-compatible
 /// netlink surface exists.
-const PR_ASTROKUBE_DNAT: i32 = 0x4b55_4244; // "KUBD"
+const PR_ASTERKUBE_DNAT: i32 = 0x4b55_4244; // "KUBD"
 
 /// A non-Linux astrokube extension: mark a bridge (by its interface index in
 /// `arg2`) as a masquerade uplink, so traffic forwarded onto it is source-NATed
-/// to the uplink's address. Temporary scaffolding alongside [`PR_ASTROKUBE_DNAT`].
-const PR_ASTROKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
+/// to the uplink's address. Temporary scaffolding alongside [`PR_ASTERKUBE_DNAT`].
+const PR_ASTERKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
 
 /// A non-Linux astrokube extension: arm the ACPI power-button monitor so an
 /// orderly host poweroff is delivered to PID 1 as SIGINT for a graceful node
 /// drain. Called once by the init after the node is up; takes no arguments.
-const PR_ASTROKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
+const PR_ASTERKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
 /// astrokube: set the calling thread's astromac tenant label (arg2 = tenant id).
-const PR_ASTROKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
+const PR_ASTERKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
 /// astrokube: set the global astromac mode (arg2 = MacMode: 0/1/2).
-const PR_ASTROKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
+const PR_ASTERKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
 /// astrokube: label the file at fd (arg2 = fd) with a tenant (arg3 = tenant).
-const PR_ASTROKUBE_LABEL_FD: i32 = 0x4b55_464c; // "KUFL"
+const PR_ASTERKUBE_LABEL_FD: i32 = 0x4b55_464c; // "KUFL"
 /// astrokube: label an IPv4 endpoint (arg2 = ip, be u32) with a tenant (arg3).
-const PR_ASTROKUBE_LABEL_IP: i32 = 0x4b55_4950; // "KUIP"
+const PR_ASTERKUBE_LABEL_IP: i32 = 0x4b55_4950; // "KUIP"
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -351,20 +351,20 @@ pub enum PrctlCmd {
     PR_GET_NO_NEW_PRIVS,
     PR_GET_SECCOMP,
     PR_SET_SECCOMP { mode: u64, filter_ptr: Vaddr },
-    PR_ASTROKUBE_DNAT {
+    PR_ASTERKUBE_DNAT {
         vip: u32,
         backend: u32,
         ports: u32,
         proto: u32,
     },
-    PR_ASTROKUBE_MASQ {
+    PR_ASTERKUBE_MASQ {
         bridge_index: u32,
     },
-    PR_ASTROKUBE_ACPI,
-    PR_ASTROKUBE_SETTENANT(u32),
-    PR_ASTROKUBE_MAC_MODE(u32),
-    PR_ASTROKUBE_LABEL_FD { fd: u32, tenant: u32 },
-    PR_ASTROKUBE_LABEL_IP { ipv4: u32, tenant: u32 },
+    PR_ASTERKUBE_ACPI,
+    PR_ASTERKUBE_SETTENANT(u32),
+    PR_ASTERKUBE_MAC_MODE(u32),
+    PR_ASTERKUBE_LABEL_FD { fd: u32, tenant: u32 },
+    PR_ASTERKUBE_LABEL_IP { ipv4: u32, tenant: u32 },
 }
 
 #[repr(u64)]
@@ -413,23 +413,23 @@ impl PrctlCmd {
                 mode: arg2,
                 filter_ptr: arg3 as _,
             }),
-            PR_ASTROKUBE_DNAT => Ok(PrctlCmd::PR_ASTROKUBE_DNAT {
+            PR_ASTERKUBE_DNAT => Ok(PrctlCmd::PR_ASTERKUBE_DNAT {
                 vip: arg2 as u32,
                 backend: arg3 as u32,
                 ports: arg4 as u32,
                 proto: arg5 as u32,
             }),
-            PR_ASTROKUBE_MASQ => Ok(PrctlCmd::PR_ASTROKUBE_MASQ {
+            PR_ASTERKUBE_MASQ => Ok(PrctlCmd::PR_ASTERKUBE_MASQ {
                 bridge_index: arg2 as u32,
             }),
-            PR_ASTROKUBE_ACPI => Ok(PrctlCmd::PR_ASTROKUBE_ACPI),
-            PR_ASTROKUBE_SETTENANT => Ok(PrctlCmd::PR_ASTROKUBE_SETTENANT(arg2 as u32)),
-            PR_ASTROKUBE_MAC_MODE => Ok(PrctlCmd::PR_ASTROKUBE_MAC_MODE(arg2 as u32)),
-            PR_ASTROKUBE_LABEL_FD => Ok(PrctlCmd::PR_ASTROKUBE_LABEL_FD {
+            PR_ASTERKUBE_ACPI => Ok(PrctlCmd::PR_ASTERKUBE_ACPI),
+            PR_ASTERKUBE_SETTENANT => Ok(PrctlCmd::PR_ASTERKUBE_SETTENANT(arg2 as u32)),
+            PR_ASTERKUBE_MAC_MODE => Ok(PrctlCmd::PR_ASTERKUBE_MAC_MODE(arg2 as u32)),
+            PR_ASTERKUBE_LABEL_FD => Ok(PrctlCmd::PR_ASTERKUBE_LABEL_FD {
                 fd: arg2 as u32,
                 tenant: arg3 as u32,
             }),
-            PR_ASTROKUBE_LABEL_IP => Ok(PrctlCmd::PR_ASTROKUBE_LABEL_IP {
+            PR_ASTERKUBE_LABEL_IP => Ok(PrctlCmd::PR_ASTERKUBE_LABEL_IP {
                 ipv4: arg2 as u32,
                 tenant: arg3 as u32,
             }),

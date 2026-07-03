@@ -6,7 +6,7 @@
 //! ruleset. We don't run a general nft engine; instead we extract just the
 //! Service ClusterIP -> backend mapping from the messages it sends and install
 //! it into `aster_bigtcp::nat::nat_table()` (the same fast datapath the
-//! `PR_ASTROKUBE_DNAT` prctl drives). This is control-plane translation, not
+//! `PR_ASTERKUBE_DNAT` prctl drives). This is control-plane translation, not
 //! per-packet interpretation.
 //!
 //! Two pieces of kube-proxy's ruleset carry everything we need, and both are
