@@ -51,6 +51,7 @@ logo-ascii-art.workspace = true
 lru.workspace = true
 no_std_io2.workspace = true
 osdk-frame-allocator.workspace = true
+ruzstd.workspace = true
 osdk-heap-allocator.workspace = true
 ostd.workspace = true
 ostd-pod.workspace = true
