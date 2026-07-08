@@ -24,6 +24,7 @@ kcmd_args = [
     "USER=root",
     "PATH=/bin:/sbin:/usr/bin",
     "console=hvc0",
+    "ASTERKUBE_PERSIST=1",
     "init=/sbin/init",
 ]
 init_args = []
