@@ -101,10 +101,22 @@ rc=0
 case "$MODE" in
   astrokube)
     maybe_start_virtiofs
+    # Optional cluster join bundle: an ext2 disk (label astrokubecfg) produced by
+    # astrokube/astrokube-join.sh, carrying the target cluster's kubeconfig + CA +
+    # node settings. Attach it and the node binds to that cluster at boot.
+    JOIN_ARGS=()
+    if [ -n "${JOIN_BUNDLE:-}" ]; then
+      [ -f "$JOIN_BUNDLE" ] || { echo "missing JOIN_BUNDLE=$JOIN_BUNDLE" >&2; exit 1; }
+      echo "==> attaching cluster join bundle: $JOIN_BUNDLE"
+      JOIN_ARGS=(
+        -drive if=none,format=raw,id=join,file="$JOIN_BUNDLE"
+        -device virtio-blk-pci,drive=join,serial=astrokubecfg,disable-legacy=on,disable-modern=off
+      )
+    fi
     # User-mode (slirp) NIC so the guest's eth0 has outbound connectivity (the
     # host is reachable from the guest at 10.0.2.2). virtio-net flags mirror
     # tools/qemu_args.sh, which the Asterinas virtio-net driver expects.
-    qemu-system-x86_64 "${COMMON[@]}" "${VIRTIOFS_ARGS[@]}" \
+    qemu-system-x86_64 "${COMMON[@]}" "${VIRTIOFS_ARGS[@]}" "${JOIN_ARGS[@]}" \
       -cdrom target/osdk/aster-kernel-osdk-bin.iso -boot d \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
       -drive if=none,format=qcow2,id=x0,file=test/initramfs/build/ext2.qcow2 \
