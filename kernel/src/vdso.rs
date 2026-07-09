@@ -230,6 +230,10 @@ const PREBUILT_VDSO_LIB: &[u8] =
 // tree; see `tools/build_vdso_aarch64.sh`.
 #[cfg(target_arch = "aarch64")]
 const PREBUILT_VDSO_LIB: &[u8] = include_bytes!("vdso_aarch64.so");
+// The ARMv7 vDSO is likewise a hand-written, C-free shared object checked into
+// the tree; see `tools/build_vdso_arm.sh`.
+#[cfg(target_arch = "arm")]
+const PREBUILT_VDSO_LIB: &[u8] = include_bytes!("vdso_arm.so");
 
 /// The offset from the vDSO base to the `__vdso_rt_sigreturn` function.
 ///
@@ -239,6 +243,8 @@ const PREBUILT_VDSO_LIB: &[u8] = include_bytes!("vdso_aarch64.so");
 pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x5b0;
 #[cfg(target_arch = "aarch64")]
 pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x2b0;
+#[cfg(target_arch = "arm")]
+pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x200;
 
 impl Vdso {
     /// Constructs a new `Vdso`, including an initialized `VdsoData` and a VMO of the vDSO.
@@ -428,6 +434,17 @@ pub const VDSO_VMO_LAYOUT: VdsoVmoLayout = VdsoVmoLayout {
 };
 
 #[cfg(target_arch = "aarch64")]
+pub const VDSO_VMO_LAYOUT: VdsoVmoLayout = VdsoVmoLayout {
+    data_segment_offset: 0,
+    data_segment_size: PAGE_SIZE,
+    text_segment_offset: 2 * PAGE_SIZE,
+    text_segment_size: PAGE_SIZE,
+    data_offset: 0,
+
+    size: 3 * PAGE_SIZE,
+};
+
+#[cfg(target_arch = "arm")]
 pub const VDSO_VMO_LAYOUT: VdsoVmoLayout = VdsoVmoLayout {
     data_segment_offset: 0,
     data_segment_size: PAGE_SIZE,

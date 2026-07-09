@@ -1344,7 +1344,7 @@ impl FileOps for ExfatInode {
 
             if dir_cnt == 0
                 && visitor
-                    .visit(".", inner.ino, inner.inode_type, 0xFFFFFFFFFFFFFFFEusize)
+                    .visit(".", inner.ino, inner.inode_type, (usize::MAX - 1))
                     .is_ok()
             {
                 dir_read += 1;
@@ -1356,7 +1356,7 @@ impl FileOps for ExfatInode {
                 let ino = parent_inner.ino;
                 let type_ = parent_inner.inode_type;
                 if visitor
-                    .visit("..", ino, type_, 0xFFFFFFFFFFFFFFFFusize)
+                    .visit("..", ino, type_, usize::MAX)
                     .is_ok()
                 {
                     dir_read += 1;

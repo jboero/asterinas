@@ -258,9 +258,17 @@ fn check_elf_header(elf_header: &ElfHeader) -> Result<()> {
     const EXPECTED_ELF_MACHINE: header::Machine = header::Machine::Other(258);
     #[cfg(target_arch = "aarch64")]
     const EXPECTED_ELF_MACHINE: header::Machine = header::Machine::AArch64;
+    #[cfg(target_arch = "arm")]
+    const EXPECTED_ELF_MACHINE: header::Machine = header::Machine::Arm;
 
-    if elf_header.pt1.class() != header::Class::SixtyFour {
-        return_errno_with_message!(Errno::ENOEXEC, "the ELF file is not 64-bit");
+    // ARM is a 32-bit architecture; every other supported target is 64-bit.
+    #[cfg(not(target_arch = "arm"))]
+    const EXPECTED_ELF_CLASS: header::Class = header::Class::SixtyFour;
+    #[cfg(target_arch = "arm")]
+    const EXPECTED_ELF_CLASS: header::Class = header::Class::ThirtyTwo;
+
+    if elf_header.pt1.class() != EXPECTED_ELF_CLASS {
+        return_errno_with_message!(Errno::ENOEXEC, "the ELF file has an unexpected class");
     }
 
     if elf_header.pt1.data() != header::Data::LittleEndian {

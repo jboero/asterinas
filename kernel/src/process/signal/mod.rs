@@ -153,6 +153,8 @@ pub fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                 const SYSCALL_INSTR_LEN: usize = 4; // syscall
                 #[cfg(target_arch = "aarch64")]
                 const SYSCALL_INSTR_LEN: usize = 4; // svc
+                #[cfg(target_arch = "arm")]
+                const SYSCALL_INSTR_LEN: usize = 4; // svc
 
                 user_ctx.set_syscall_ret(orig_syscall_ret);
                 user_ctx
@@ -409,8 +411,8 @@ pub fn handle_user_signal(
             // TODO: Set the flags in the context structure.
             // Reference: <https://elixir.bootlin.com/linux/v6.15.7/source/arch/loongarch/kernel/signal.c#L805>
             let fpu_context_addr = (ucontext_addr as usize) + size_of::<ucontext_t>();
-        } else if #[cfg(target_arch = "aarch64")] {
-            // On AArch64 the FP/SIMD state lives in the `__reserved` area that
+        } else if #[cfg(any(target_arch = "aarch64", target_arch = "arm"))] {
+            // On AArch64/ARM the FP/SIMD state lives in the reserved area that
             // follows the `mcontext_t` inside the `ucontext_t`; we place the FPU
             // bytes immediately after the `ucontext_t`.
             let ucontext_addr = alloc_aligned_in_user_stack(
@@ -436,7 +438,7 @@ pub fn handle_user_signal(
         restorer_addr
     } else {
         cfg_if::cfg_if! {
-            if #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))] {
+            if #[cfg(any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "arm"))] {
                 ctx.user_space().vmar().process_vm().vdso_base()
                     + crate::vdso::__VDSO_RT_SIGRETURN_OFFSET
             } else {
@@ -456,6 +458,9 @@ pub fn handle_user_signal(
         } else if #[cfg(target_arch = "aarch64")] {
             // The return address goes in the link register (`x30`).
             user_ctx.set_x(30, retaddr);
+        } else if #[cfg(target_arch = "arm")] {
+            // The return address goes in the link register (`r14`/`lr`).
+            user_ctx.set_r(14, retaddr);
         } else {
             compile_error!("unsupported target");
         }

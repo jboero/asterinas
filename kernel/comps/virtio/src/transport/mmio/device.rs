@@ -144,21 +144,21 @@ impl VirtioTransport for VirtioMmioTransport {
                     .write_once(&(descriptor_daddr as u32))
                     .unwrap();
                 field_ptr!(&self.layout, VirtioMmioLayout, queue_desc_high)
-                    .write_once(&((descriptor_daddr >> 32) as u32))
+                    .write_once(&(((descriptor_daddr as u64) >> 32) as u32))
                     .unwrap();
 
                 field_ptr!(&self.layout, VirtioMmioLayout, queue_driver_low)
                     .write_once(&(driver_daddr as u32))
                     .unwrap();
                 field_ptr!(&self.layout, VirtioMmioLayout, queue_driver_high)
-                    .write_once(&((driver_daddr >> 32) as u32))
+                    .write_once(&(((driver_daddr as u64) >> 32) as u32))
                     .unwrap();
 
                 field_ptr!(&self.layout, VirtioMmioLayout, queue_device_low)
                     .write_once(&(device_daddr as u32))
                     .unwrap();
                 field_ptr!(&self.layout, VirtioMmioLayout, queue_device_high)
-                    .write_once(&((device_daddr >> 32) as u32))
+                    .write_once(&(((device_daddr as u64) >> 32) as u32))
                     .unwrap();
                 // enable queue
                 field_ptr!(&self.layout, VirtioMmioLayout, queue_sel)

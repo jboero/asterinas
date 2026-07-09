@@ -1125,9 +1125,22 @@ struct UniqueNoGenerator;
 // Unique offset and ino layout: `| LayerIdx (8 bits) | Real fs offset or ino (56 bits) |`
 impl UniqueNoGenerator {
     const NUM_HIGHER_BITS: usize = 8;
+    // The unique `usize` inode number packs an 8-bit layer index above the
+    // per-filesystem offset. On 64-bit targets that leaves 56 low bits; on
+    // 32-bit `usize` only 24 (the `HIGHER_MASK`/`LOWER_MASK` literals must also
+    // fit in `usize`).
+    #[cfg(target_pointer_width = "64")]
     const NUM_LOWER_BITS: usize = 56;
+    #[cfg(target_pointer_width = "64")]
     const HIGHER_MASK: usize = 0xFF00_0000_0000_0000;
+    #[cfg(target_pointer_width = "64")]
     const LOWER_MASK: usize = 0x00FF_FFFF_FFFF_FFFF;
+    #[cfg(target_pointer_width = "32")]
+    const NUM_LOWER_BITS: usize = 24;
+    #[cfg(target_pointer_width = "32")]
+    const HIGHER_MASK: usize = 0xFF00_0000;
+    #[cfg(target_pointer_width = "32")]
+    const LOWER_MASK: usize = 0x00FF_FFFF;
 
     pub fn gen_unique_offset(layer_idx: LayerIdx, fs_offset: usize) -> Result<usize> {
         if fs_offset & Self::HIGHER_MASK != 0 {

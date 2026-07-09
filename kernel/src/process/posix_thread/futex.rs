@@ -635,17 +635,17 @@ impl FutexIdentity {
             FutexIdentity::Private { vmar, addr } => {
                 let vmar_id = vmar.as_ptr() as u64;
                 let vmar_mix = (vmar_id as u32) ^ ((vmar_id >> 32) as u32).rotate_left(16);
-                jhash::jhash_3vals(*addr as u32, (*addr >> 32) as u32, vmar_mix, 0) as usize
+                jhash::jhash_3vals(*addr as u32, ((*addr as u64) >> 32) as u32, vmar_mix, 0) as usize
             }
             FutexIdentity::SharedLocal { vmar, addr } => {
                 let vmar_id = vmar.as_ptr() as u64;
                 let vmar_mix = (vmar_id as u32) ^ ((vmar_id >> 32) as u32).rotate_left(16);
-                jhash::jhash_3vals(*addr as u32, (*addr >> 32) as u32, vmar_mix, 1) as usize
+                jhash::jhash_3vals(*addr as u32, ((*addr as u64) >> 32) as u32, vmar_mix, 1) as usize
             }
             FutexIdentity::Shared { vmo, offset } => {
                 let vmo_id = Weak::as_ptr(vmo) as u64;
                 let vmo_mix = (vmo_id as u32) ^ ((vmo_id >> 32) as u32).rotate_left(16);
-                jhash::jhash_3vals(*offset as u32, (*offset >> 32) as u32, vmo_mix, 2) as usize
+                jhash::jhash_3vals(*offset as u32, ((*offset as u64) >> 32) as u32, vmo_mix, 2) as usize
             }
         }
     }

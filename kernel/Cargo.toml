@@ -16,7 +16,6 @@ aster-fuse.workspace = true
 aster-i8042.workspace = true
 aster-input.workspace = true
 aster-logger.workspace = true
-aster-mlsdisk.workspace = true
 aster-network.workspace = true
 aster-nvme.workspace = true
 aster-rights.workspace = true
@@ -79,6 +78,12 @@ riscv = { version = "0.15.0", features = ["s-mode"] }
 
 [target.loongarch64-unknown-none-softfloat.dependencies]
 loongArch64 = "0.2.5"
+
+# `aster-mlsdisk` assumes a 64-bit architecture (8-byte block IDs, Pod on-disk
+# structs) and is not used by the boot path, so it is excluded from the 32-bit
+# ARM build. TODO: port `aster-mlsdisk` to 32-bit and re-enable.
+[target.'cfg(not(target_arch = "arm"))'.dependencies]
+aster-mlsdisk.workspace = true
 
 [features]
 default = ["cvm_guest"]

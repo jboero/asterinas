@@ -201,6 +201,8 @@ impl UtsName {
                 "loongarch64"
             } else if #[cfg(target_arch = "aarch64")] {
                 "aarch64"
+            } else if #[cfg(target_arch = "arm")] {
+                "armv7l"
             } else {
                 compile_error!("unsupported target")
             }

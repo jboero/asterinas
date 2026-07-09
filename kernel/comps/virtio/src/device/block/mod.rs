@@ -191,11 +191,13 @@ impl ConfigManager<VirtioBlockConfig> {
     pub(self) fn capacity_sectors(&self) -> usize {
         let cap_low = self
             .read_once::<u32>(offset_of!(VirtioBlockConfig, capacity))
-            .unwrap() as usize;
+            .unwrap() as u64;
         let cap_high = self
             .read_once::<u32>(offset_of!(VirtioBlockConfig, capacity) + 4)
-            .unwrap() as usize;
+            .unwrap() as u64;
 
-        (cap_high << 32) | cap_low
+        // The device capacity is a 64-bit sector count; compute in `u64` and
+        // narrow to `usize` (on 32-bit targets this bounds addressable disks).
+        (((cap_high << 32) | cap_low) as usize)
     }
 }

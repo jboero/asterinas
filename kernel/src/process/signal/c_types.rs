@@ -209,7 +209,8 @@ pub struct ucontext_t {
 #[cfg(any(
     target_arch = "riscv64",
     target_arch = "loongarch64",
-    target_arch = "aarch64"
+    target_arch = "aarch64",
+    target_arch = "arm"
 ))]
 #[padding_struct]
 #[repr(C)]
@@ -231,7 +232,8 @@ pub struct ucontext_t {
 #[cfg(any(
     target_arch = "riscv64",
     target_arch = "loongarch64",
-    target_arch = "aarch64"
+    target_arch = "aarch64",
+    target_arch = "arm"
 ))]
 impl Default for ucontext_t {
     fn default() -> Self {
