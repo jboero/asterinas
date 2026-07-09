@@ -6,7 +6,8 @@
     any(
         target_arch = "riscv64",
         target_arch = "loongarch64",
-        target_arch = "aarch64"
+        target_arch = "aarch64",
+        target_arch = "arm"
     ),
     expect(dead_code)
 )]
@@ -21,6 +22,7 @@ use crate::{cpu::LinuxAbi, prelude::*};
 #[cfg_attr(target_arch = "riscv64", path = "arch/riscv.rs")]
 #[cfg_attr(target_arch = "loongarch64", path = "arch/loongarch.rs")]
 #[cfg_attr(target_arch = "aarch64", path = "arch/aarch64.rs")]
+#[cfg_attr(target_arch = "arm", path = "arch/arm.rs")]
 mod arch;
 
 mod accept;

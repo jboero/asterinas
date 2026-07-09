@@ -41,6 +41,7 @@ macro_rules! __log_prefix {
 #[cfg_attr(target_arch = "riscv64", path = "arch/riscv/mod.rs")]
 #[cfg_attr(target_arch = "loongarch64", path = "arch/loongarch/mod.rs")]
 #[cfg_attr(target_arch = "aarch64", path = "arch/aarch64/mod.rs")]
+#[cfg_attr(target_arch = "arm", path = "arch/arm/mod.rs")]
 mod arch;
 
 mod context;
@@ -65,7 +66,8 @@ mod util;
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "riscv64",
-    target_arch = "aarch64"
+    target_arch = "aarch64",
+    target_arch = "arm"
 ))]
 mod vdso;
 mod vm;

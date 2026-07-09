@@ -18,5 +18,8 @@ chrono = { version = "0.4.38", default-features = false }
 [target.aarch64-unknown-none-softfloat.dependencies]
 chrono = { version = "0.4.38", default-features = false }
 
+[target.armv7a-none-eabi.dependencies]
+chrono = { version = "0.4.38", default-features = false }
+
 [lints]
 workspace = true
