@@ -152,10 +152,14 @@ fn invoke_ffi_init_funcs() {
         fn __sinit_array();
         fn __einit_array();
     }
-    let call_len = (__einit_array as *const () as usize - __sinit_array as *const () as usize) / 8;
+    // Each `.init_array` entry is one function pointer, whose width is the
+    // target's pointer size (8 bytes on 64-bit, 4 on 32-bit) — not a hardcoded 8.
+    let ptr_size = core::mem::size_of::<*const fn()>();
+    let call_len =
+        (__einit_array as *const () as usize - __sinit_array as *const () as usize) / ptr_size;
     for i in 0..call_len {
         unsafe {
-            let function = (__sinit_array as *const () as usize + 8 * i) as *const fn();
+            let function = (__sinit_array as *const () as usize + ptr_size * i) as *const fn();
             (*function)();
         }
     }

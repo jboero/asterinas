@@ -86,9 +86,14 @@ _start:
     str     r0, [r5, #(2 * 8)]
     str     r1, [r5, #(2 * 8 + 4)]
 
-    // [3] linear map of PA 0x4000_0000 (Normal: RAM+kernel) -> VA 0xC000_0000
-    ldr     r0, =(NORMAL_BLOCK_LO | 0x40000000)
-    ldr     r1, =NORMAL_BLOCK_HI
+    // [3] -> boot_kernel_l2 table. The top GiB (0xC000_0000..) holds the linear
+    // map of RAM *and* the vmalloc / frame-metadata regions, which the Rust boot
+    // page-table code fills in per-page. A 1 GiB block there would make those
+    // sub-maps impossible, so entry 3 points at a level-2 table that pre-maps
+    // only the linear RAM (as 2 MiB blocks) and leaves the rest absent.
+    ldr     r0, =boot_kernel_l2
+    orr     r0, r0, #0x3             // table descriptor
+    mov     r1, #0
     str     r0, [r5, #(3 * 8)]
     str     r1, [r5, #(3 * 8 + 4)]
 
@@ -139,6 +144,20 @@ _start:
 .balign 4096
 boot_root_l1:
     .zero 4096
+
+// ---- Level-2 table for the top GiB (VA 0xC000_0000..0xFFFF_FFFF) ------------
+// Entries 0..255 pre-map the linear view of RAM as 2 MiB Normal blocks:
+//   VA 0xC000_0000 + i*2MiB -> PA 0x4000_0000 + i*2MiB   (512 MiB, incl. kernel)
+// Entries 256..511 (VA 0xE000_0000..) are absent so the Rust boot page-table
+// code can map the vmalloc and frame-metadata regions there per-page.
+.balign 4096
+boot_kernel_l2:
+    .set i, 0
+    .rept 256
+        .quad (NORMAL_BLOCK_LO | (0x40000000 + i * 0x200000))
+        .set i, i + 1
+    .endr
+    .zero (512 - 256) * 8
 
 .section ".boot.stack", "aw", %nobits
 boot_stack_bottom:

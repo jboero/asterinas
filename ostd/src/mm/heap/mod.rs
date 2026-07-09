@@ -108,14 +108,23 @@ unsafe impl GlobalAlloc for AllocDispatch {
             return core::ptr::null_mut();
         };
 
-        if required_slot.size() != slot.size()
-            || slot.size() < layout.size()
-            || !(slot.as_ptr() as Vaddr).is_multiple_of(layout.align())
+        // Read each quantity into a local once. Re-evaluating `slot.size()` etc.
+        // inline in both the condition and the abort message miscompiled on
+        // armv7a (the branch was taken even though every sub-condition was
+        // false); binding to locals is also clearer.
+        let req_size = required_slot.size();
+        let slot_size = slot.size();
+        let lay_size = layout.size();
+        let lay_align = layout.align();
+        let slot_ptr = slot.as_ptr();
+        if req_size != slot_size
+            || slot_size < lay_size
+            || !(slot_ptr as Vaddr).is_multiple_of(lay_align)
         {
             abort_with_message!(
                 "Heap allocation mismatch: slot ptr = {:p}, size = {:x}; layout = {:#x?}; required_slot = {:#x?}",
-                slot.as_ptr(),
-                slot.size(),
+                slot_ptr,
+                slot_size,
                 layout,
                 required_slot,
             );

@@ -62,8 +62,10 @@ const PTE_AP_RO: u64 = 1 << 7; // AP[2]: read-only
 const PTE_SH_INNER: u64 = 0b11 << 8;
 const PTE_AF: u64 = 1 << 10; // access flag
 const PTE_NG: u64 = 1 << 11; // not global
-const PTE_PXN: u64 = 1 << 53; // privileged execute never
-const PTE_UXN: u64 = 1 << 54; // unprivileged execute never
+const PTE_PXN: u64 = 1 << 53; // privileged (PL1) execute never
+// On ARMv7-A LPAE (unlike AArch64, where bit 54 is the *unprivileged*-only
+// UXN), bit 54 is XN: it forbids execution at *every* privilege level.
+const PTE_XN: u64 = 1 << 54; // execute never (all privilege levels)
 // Software-reserved bits [58:55] used to carry Asterinas metadata.
 const PTE_SW_DIRTY: u64 = 1 << 55;
 const PTE_SW_PG_AVAIL1: u64 = 1 << 56;
@@ -206,11 +208,9 @@ impl PageTableEntry {
 
         let is_user = (raw & PTE_AP_EL0) != 0;
         let writable = (raw & PTE_AP_RO) == 0;
-        let executable = if is_user {
-            (raw & PTE_UXN) == 0
-        } else {
-            (raw & PTE_PXN) == 0
-        };
+        // A page is executable (at its accessible privilege level) iff XN is
+        // clear. PXN additionally restricts PL1 execution of user pages.
+        let executable = (raw & PTE_XN) == 0;
 
         let mut flags = PageFlags::R;
         if writable {
@@ -284,17 +284,17 @@ impl PageTableEntry {
             raw |= PTE_AP_EL0;
         }
 
-        // Execute-never bits: forbid execution wherever it is not requested.
+        // Execute-never bits (ARMv7 LPAE semantics):
+        //  - XN (bit 54) forbids execution at *all* privilege levels;
+        //  - PXN (bit 53) additionally forbids PL1 execution.
+        // A non-executable page sets XN. A user page also sets PXN so that the
+        // kernel (PL1) cannot execute user code; a kernel page leaves PXN clear
+        // so that PL1 can execute it.
+        if !executable {
+            raw |= PTE_XN;
+        }
         if is_user {
-            raw |= PTE_PXN; // never executable at PL1
-            if !executable {
-                raw |= PTE_UXN;
-            }
-        } else {
-            raw |= PTE_UXN; // never executable at PL0
-            if !executable {
-                raw |= PTE_PXN;
-            }
+            raw |= PTE_PXN;
         }
 
         if !prop.priv_flags.contains(PrivFlags::GLOBAL) {

@@ -283,13 +283,36 @@ pub fn init_kernel_page_table(meta_pages: Segment<MetaPageMeta>) {
     {
         let max_paddr = crate::mm::frame::max_paddr();
         let from = LINEAR_MAPPING_BASE_VADDR..LINEAR_MAPPING_BASE_VADDR + max_paddr;
-        let prop = PageProperty {
-            flags: PageFlags::RW,
-            cache: CachePolicy::Writeback,
-            priv_flags: PrivilegedPageFlags::GLOBAL,
-        };
+        // On ARMv7 the kernel image executes inside the linear mapping (its code
+        // base coincides with the linear-map base), so the linear mapping must be
+        // executable and the separate kernel-code mapping below is skipped. Other
+        // arches keep the linear mapping non-executable (W^X).
+        #[cfg(not(target_arch = "arm"))]
+        let flags = PageFlags::RW;
+        #[cfg(target_arch = "arm")]
+        let flags = PageFlags::RWX;
+
         let mut cursor = kpt.cursor_mut(&preempt_guard, &from).unwrap();
         for (pa, level) in largest_pages::<KernelPtConfig>(from.start, 0, max_paddr) {
+            // On ARMv7 the linear map also covers the low physical MMIO window
+            // (the PL011 UART, GIC, etc. below the RAM base at 0x4000_0000);
+            // those pages must be Device (uncacheable), not Normal Writeback,
+            // or device accesses through the linear map after the switch are
+            // silently cached. RAM stays Writeback.
+            #[cfg(target_arch = "arm")]
+            let cache = if pa < 0x4000_0000 {
+                CachePolicy::Uncacheable
+            } else {
+                CachePolicy::Writeback
+            };
+            #[cfg(not(target_arch = "arm"))]
+            let cache = CachePolicy::Writeback;
+
+            let prop = PageProperty {
+                flags,
+                cache,
+                priv_flags: PrivilegedPageFlags::GLOBAL,
+            };
             // SAFETY: we are doing the linear mapping for the kernel.
             unsafe { cursor.map(MappedItem::Untracked(pa, level, prop)) };
         }
@@ -317,8 +340,10 @@ pub fn init_kernel_page_table(meta_pages: Segment<MetaPageMeta>) {
         }
     }
 
-    // In LoongArch64, we don't need to do linear mappings for the kernel code because of DMW0.
-    #[cfg(not(target_arch = "loongarch64"))]
+    // In LoongArch64, we don't need to do linear mappings for the kernel code
+    // because of DMW0. On ARMv7 the kernel code is already covered (executably)
+    // by the linear mapping above, so a separate mapping would double-map it.
+    #[cfg(not(any(target_arch = "loongarch64", target_arch = "arm")))]
     // Map for the kernel code itself.
     // TODO: set separated permissions for each segments in the kernel.
     {

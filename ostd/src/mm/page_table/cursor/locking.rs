@@ -12,7 +12,8 @@ use crate::{
         HasPaddr, Vaddr, nr_subpage_per_huge, paddr_to_vaddr,
         page_table::{
             PageTable, PageTableConfig, PageTableGuard, PageTableNodeRef, PagingConstsTrait,
-            PagingLevel, PteScalar, PteStateRef, PteTrait, load_pte, page_size, pte_index,
+            PagingLevel, PteScalar, PteStateRef, PteTrait, align_down_to_node_base, load_pte,
+            node_span_size, page_size, pte_index,
         },
     },
     task::atomic_mode::InAtomicMode,
@@ -38,7 +39,7 @@ pub(super) fn lock_range<'rcu, C: PageTableConfig>(
     // Once we have locked the sub-tree that is not stray, we won't read any
     // stray nodes in the following traversal since we must lock before reading.
     let guard_level = subtree_root.level();
-    let cur_node_va = va.start.align_down(page_size::<C>(guard_level + 1));
+    let cur_node_va = align_down_to_node_base::<C>(va.start, guard_level);
     dfs_acquire_lock(guard, &mut subtree_root, cur_node_va, va.clone());
 
     let mut path = core::array::from_fn(|_| None);
@@ -62,10 +63,7 @@ pub(super) fn unlock_range<C: PageTableConfig>(cursor: &mut Cursor<'_, C>) {
         }
     }
     let guard_node = cursor.path[cursor.guard_level as usize - 1].take().unwrap();
-    let cur_node_va = cursor
-        .barrier_va
-        .start
-        .align_down(page_size::<C>(cursor.guard_level + 1));
+    let cur_node_va = align_down_to_node_base::<C>(cursor.barrier_va.start, cursor.guard_level);
 
     // SAFETY: A cursor maintains that its corresponding sub-tree is locked.
     unsafe {
@@ -191,7 +189,9 @@ fn dfs_acquire_lock<C: PageTableConfig>(
             PteStateRef::PageTable(pt) => {
                 let mut pt_guard = pt.lock(guard);
                 let child_node_va = cur_node_va + i * page_size::<C>(cur_level);
-                let child_node_va_end = child_node_va + page_size::<C>(cur_level);
+                // The end of the last child may be the top of the address space,
+                // which overflows `usize` on 32-bit targets; saturate it.
+                let child_node_va_end = child_node_va.saturating_add(page_size::<C>(cur_level));
                 let va_start = va_range.start.max(child_node_va);
                 let va_end = va_range.end.min(child_node_va_end);
                 dfs_acquire_lock(guard, &mut pt_guard, child_node_va, va_start..va_end);
@@ -227,7 +227,9 @@ unsafe fn dfs_release_lock<'rcu, C: PageTableConfig>(
                 // SAFETY: The caller ensures that the node is locked and the new guard is unique.
                 let child_node = unsafe { pt.make_guard_unchecked(guard) };
                 let child_node_va = cur_node_va + i * page_size::<C>(cur_level);
-                let child_node_va_end = child_node_va + page_size::<C>(cur_level);
+                // The end of the last child may be the top of the address space,
+                // which overflows `usize` on 32-bit targets; saturate it.
+                let child_node_va_end = child_node_va.saturating_add(page_size::<C>(cur_level));
                 let va_start = va_range.start.max(child_node_va);
                 let va_end = va_range.end.min(child_node_va_end);
                 // SAFETY: The caller ensures that all the nodes in the sub-tree are locked and all
@@ -289,7 +291,7 @@ fn dfs_get_idx_range<C: PagingConstsTrait>(
     va_range: &Range<Vaddr>,
 ) -> Range<usize> {
     debug_assert!(va_range.start >= cur_node_va);
-    debug_assert!(va_range.end <= cur_node_va.saturating_add(page_size::<C>(cur_node_level + 1)));
+    debug_assert!(va_range.end <= cur_node_va.saturating_add(node_span_size::<C>(cur_node_level)));
 
     let start_idx = (va_range.start - cur_node_va) / page_size::<C>(cur_node_level);
     let end_idx = (va_range.end - cur_node_va).div_ceil(page_size::<C>(cur_node_level));

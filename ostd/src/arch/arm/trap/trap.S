@@ -132,42 +132,58 @@ vec_undef:
 // Entered in the exception mode; `lr` already adjusted. We switch to SVC to run
 // on the kernel stack.
 
+// Builds a `TrapFrame` on the current mode's stack (19 words: r0-r15, cpsr,
+// fsr, far) with `lr` (already adjusted) as the faulting/return PC and `spsr`
+// as the saved CPSR. `r13`/`r14` are approximated (the banked kernel values are
+// not needed for page-fault recovery or panic reporting).
+.macro BUILD_KERNEL_FRAME
+    sub     sp, sp, #(19 * 4)
+    stmia   sp, {{r0-r12}}          // r0-r12 -> [sp+0 .. sp+48]
+    mov     r0, #0
+    str     r0, [sp, #(13 * 4)]     // r13 (approx)
+    str     lr, [sp, #(14 * 4)]     // r14 (approx)
+    str     lr, [sp, #(15 * 4)]     // r15 = faulting/return PC
+    mrs     r0, spsr
+    str     r0, [sp, #(16 * 4)]     // cpsr
+.endm
+
+// Returns from a kernel-mode exception: restore r0-r12 and the (possibly
+// updated) PC, and pop the frame. `movs pc, lr` restores CPSR from spsr.
+.macro RET_KERNEL_FRAME
+    ldr     lr, [sp, #(15 * 4)]
+    ldmia   sp, {{r0-r12}}
+    add     sp, sp, #(19 * 4)
+    movs    pc, lr
+.endm
+
 kernel_irq_entry:
-    // Re-run through a frame builder from IRQ mode.
-    // Save minimal frame: build TrapFrame then call irq_handler.
-    // (lr already = return-4, spsr = kernel CPSR.)
-    srsdb   sp!, #0x13
-    cps     #0x13
-    sub     sp, sp, #(4 * 4)        // space for cpsr,fsr,far and alignment
-    push    {{r0-r12}}
-    // r0 = &TrapFrame (points at saved r0)
+    BUILD_KERNEL_FRAME
+    mov     r0, #0
+    str     r0, [sp, #(17 * 4)]     // fsr = 0
+    str     r0, [sp, #(18 * 4)]     // far = 0
     mov     r0, sp
     bl      irq_handler
-    pop     {{r0-r12}}
-    add     sp, sp, #(4 * 4)
-    rfeia   sp!                     // restore {{pc, cpsr}} from SVC stack
+    RET_KERNEL_FRAME
 
 kernel_abort_entry_data:
-    srsdb   sp!, #0x13
-    cps     #0x13
-    sub     sp, sp, #(4 * 4)
-    push    {{r0-r12}}
+    BUILD_KERNEL_FRAME
+    mrc     p15, 0, r0, c5, c0, 0   // DFSR
+    str     r0, [sp, #(17 * 4)]
+    mrc     p15, 0, r0, c6, c0, 0   // DFAR
+    str     r0, [sp, #(18 * 4)]
     mov     r0, sp
     bl      kernel_data_abort_handler
-    pop     {{r0-r12}}
-    add     sp, sp, #(4 * 4)
-    rfeia   sp!
+    RET_KERNEL_FRAME
 
 kernel_abort_entry_prefetch:
-    srsdb   sp!, #0x13
-    cps     #0x13
-    sub     sp, sp, #(4 * 4)
-    push    {{r0-r12}}
+    BUILD_KERNEL_FRAME
+    mrc     p15, 0, r0, c5, c0, 1   // IFSR
+    str     r0, [sp, #(17 * 4)]
+    mrc     p15, 0, r0, c6, c0, 2   // IFAR
+    str     r0, [sp, #(18 * 4)]
     mov     r0, sp
     bl      kernel_prefetch_abort_handler
-    pop     {{r0-r12}}
-    add     sp, sp, #(4 * 4)
-    rfeia   sp!
+    RET_KERNEL_FRAME
 
 // ---- run_user(regs) --------------------------------------------------------
 // r0 = &RawUserContext. Saves the kernel state, enters USR mode, and returns

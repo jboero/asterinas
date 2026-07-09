@@ -54,12 +54,15 @@ unsafe extern "C" fn kernel_prefetch_abort_handler(f: &mut TrapFrame) {
 }
 
 fn handle_kernel_abort(f: &mut TrapFrame, exception: CpuException, info: FaultInfo) {
-    if info.is_page_fault() && (0..MAX_USERSPACE_VADDR).contains(&info.far) {
+    if info.is_page_fault()
+        && (0..MAX_USERSPACE_VADDR).contains(&info.far)
+        && USER_PAGE_FAULT_HANDLER.get().is_some()
+    {
         handle_user_page_fault(f, &exception);
     } else {
         panic!(
-            "Cannot handle kernel exception, exception: {:#x?}, trapframe: {:#x?}.",
-            exception, f
+            "Cannot handle kernel exception: far={:#x} fsr={:#x} pc={:#x} r14={:#x}, exception: {:#x?}",
+            info.far, info.fsr, f.general.r[15], f.general.r[14], exception,
         );
     }
 }

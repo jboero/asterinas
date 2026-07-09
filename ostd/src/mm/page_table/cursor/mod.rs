@@ -35,7 +35,8 @@ use align_ext::AlignExt;
 
 use super::{
     Entry, PageTable, PageTableConfig, PageTableError, PageTableGuard, PagingConstsTrait,
-    PagingLevel, PteState, PteStateRef, page_size, pte_index,
+    PagingLevel, PteState, PteStateRef, align_down_to_node_base, node_span_size, page_size,
+    pte_index,
 };
 use crate::{
     mm::{
@@ -269,8 +270,8 @@ impl<'rcu, C: PageTableConfig> Cursor<'rcu, C> {
         debug_assert!(self.barrier_va.contains(&self.va));
 
         loop {
-            let node_size = page_size::<C>(self.level + 1);
-            let node_start = self.va.align_down(node_size);
+            let node_size = node_span_size::<C>(self.level);
+            let node_start = align_down_to_node_base::<C>(self.va, self.level);
             // If the address is within the current node, we can jump directly.
             // Note that `node_start + node_size` may overflow.
             if node_start <= va && va - node_start < node_size {

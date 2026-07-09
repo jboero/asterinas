@@ -294,6 +294,40 @@ const fn nr_pte_index_bits<C: PagingConstsTrait>() -> usize {
     nr_subpage_per_huge::<C>().ilog2() as usize
 }
 
+/// Aligns `va` down to the base of the node at `level` that contains it, i.e.
+/// down to a multiple of `page_size(level + 1)`.
+///
+/// This is equivalent to `va.align_down(page_size::<C>(level + 1))` but is safe
+/// when the guard node is the root: there `page_size(level + 1)` is the size of
+/// the whole address space, which is not representable in `usize` on 32-bit
+/// targets (it overflows to 0). In that case the aligned base is 0 — correct for
+/// the non-sign-extended address spaces used on such targets.
+pub(crate) fn align_down_to_node_base<C: PagingConstsTrait>(
+    va: Vaddr,
+    level: PagingLevel,
+) -> Vaddr {
+    let shift = C::BASE_PAGE_SIZE.ilog2() as usize + nr_pte_index_bits::<C>() * (level as usize);
+    if shift >= usize::BITS as usize {
+        0
+    } else {
+        va & !((1usize << shift) - 1)
+    }
+}
+
+/// The number of bytes of virtual address space spanned by a whole node at
+/// `level`, i.e. `page_size(level + 1)`.
+///
+/// This saturates to [`usize::MAX`] when the span is the whole address space
+/// (the root node), which is not representable in `usize` on 32-bit targets.
+pub(crate) fn node_span_size<C: PagingConstsTrait>(level: PagingLevel) -> usize {
+    let shift = C::BASE_PAGE_SIZE.ilog2() as usize + nr_pte_index_bits::<C>() * (level as usize);
+    if shift >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        1usize << shift
+    }
+}
+
 /// The index of a VA's PTE in a page table node at the given level.
 const fn pte_index<C: PagingConstsTrait>(va: Vaddr, level: PagingLevel) -> usize {
     (va >> pte_index_bit_offset::<C>(level)) & (nr_subpage_per_huge::<C>() - 1)
