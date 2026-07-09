@@ -90,6 +90,28 @@ qemu.args = """\
     -rtc base=utc
 """
 
+[scheme."arm"]
+supported_archs = ["arm"]
+boot.method = "qemu-direct"
+build.strip_elf = false
+
+# ARMv7-A on the QEMU `virt` board. `cortex-a15` provides LPAE (long-descriptor
+# page tables), the ARMv7 generic timer, and GICv2 — the features the port
+# relies on. RAM is capped at 1G to stay within the 32-bit kernel linear map.
+qemu.args = """\
+    -machine virt,gic-version=2 \
+    -cpu cortex-a15 \
+    -m 512M \
+    -smp 1 \
+    --no-reboot \
+    -nographic \
+    -display none \
+    -serial chardev:mux \
+    -monitor chardev:mux \
+    -chardev stdio,id=mux,mux=on,signal=off,logfile=qemu.log \
+    -rtc base=utc
+"""
+
 [scheme."loongarch"]
 boot.method = "qemu-direct"
 build.strip_elf = false

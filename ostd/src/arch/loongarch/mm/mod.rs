@@ -294,6 +294,8 @@ impl PodOnce for PageTableEntry {}
 //  - `from_repr` and `repr` are correctly implemented;
 //  - a zeroed PTE represents an absent entry.
 unsafe impl PteTrait for PageTableEntry {
+    type Repr = usize;
+
     fn from_repr(repr: &PteScalar, level: PagingLevel) -> Self {
         match repr {
             PteScalar::Absent => PageTableEntry(0),

@@ -9,7 +9,7 @@ use core::{
     fmt::Debug,
     intrinsics::transmute_unchecked,
     ops::{Range, RangeInclusive},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use ostd_pod::Pod;
@@ -555,6 +555,14 @@ pub(crate) enum PteScalar {
 pub(crate) unsafe trait PteTrait:
     Clone + Copy + Debug + Pod + PodOnce + Sized + Send + Sync + 'static
 {
+    /// The raw integer type backing the PTE.
+    ///
+    /// On most architectures this is [`usize`], but architectures whose PTE is
+    /// wider than a pointer (e.g. ARMv7-A LPAE, whose descriptors are 64-bit on
+    /// a 32-bit `usize`) set this to a wider integer such as [`u64`]. It must
+    /// have the same size and alignment as `Self` and support atomic access.
+    type Repr: PteRepr;
+
     /// Returns architecture-specific representation of the PTE.
     fn from_repr(repr: &PteScalar, level: PagingLevel) -> Self;
 
@@ -564,20 +572,70 @@ pub(crate) unsafe trait PteTrait:
     /// otherwise the implementation can return arbitrary value.
     fn to_repr(&self, level: PagingLevel) -> PteScalar;
 
-    /// Converts the PTE into a raw `usize` value.
-    fn as_usize(self) -> usize {
-        const { assert!(size_of::<Self>() == size_of::<usize>()) };
+    /// Converts the PTE into its raw backing integer.
+    fn as_raw(self) -> Self::Repr {
+        const { assert!(size_of::<Self>() == size_of::<Self::Repr>()) };
 
-        // SAFETY: `Self` is `Pod` and has the same memory representation as `usize`.
+        // SAFETY: `Self` is `Pod` and has the same memory representation as `Repr`.
         unsafe { transmute_unchecked(self) }
     }
 
-    /// Converts the raw `usize` value into a PTE.
-    fn from_usize(pte_raw: usize) -> Self {
-        const { assert!(size_of::<Self>() == size_of::<usize>()) };
+    /// Converts the raw backing integer into a PTE.
+    fn from_raw(pte_raw: Self::Repr) -> Self {
+        const { assert!(size_of::<Self>() == size_of::<Self::Repr>()) };
 
-        // SAFETY: `Self` is `Pod` and has the same memory representation as `usize`.
+        // SAFETY: `Self` is `Pod` and has the same memory representation as `Repr`.
         unsafe { transmute_unchecked(pte_raw) }
+    }
+}
+
+/// A raw integer type that can back a [`PteTrait`] and be accessed atomically.
+///
+/// This exists so that the generic page-table code can atomically load and store
+/// PTEs regardless of whether they are pointer-sized ([`usize`]) or wider
+/// ([`u64`], as used by ARMv7-A LPAE on a 32-bit target).
+///
+/// # Safety
+///
+/// The atomic operations must correctly load/store a value of `Self` through a
+/// pointer that is validly aligned for atomic access.
+pub(crate) unsafe trait PteRepr: Copy + Pod + 'static {
+    /// Atomically loads a value through `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// Same preconditions as the corresponding `Atomic*::from_ptr`.
+    unsafe fn load_atomic(ptr: *mut Self, ordering: Ordering) -> Self;
+
+    /// Atomically stores `val` through `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// Same preconditions as the corresponding `Atomic*::from_ptr`.
+    unsafe fn store_atomic(ptr: *mut Self, val: Self, ordering: Ordering);
+}
+
+// SAFETY: `AtomicUsize` performs correct atomic access to a `usize`.
+unsafe impl PteRepr for usize {
+    unsafe fn load_atomic(ptr: *mut Self, ordering: Ordering) -> Self {
+        // SAFETY: The safety is upheld by the caller.
+        unsafe { AtomicUsize::from_ptr(ptr).load(ordering) }
+    }
+    unsafe fn store_atomic(ptr: *mut Self, val: Self, ordering: Ordering) {
+        // SAFETY: The safety is upheld by the caller.
+        unsafe { AtomicUsize::from_ptr(ptr).store(val, ordering) }
+    }
+}
+
+// SAFETY: `AtomicU64` performs correct atomic access to a `u64`.
+unsafe impl PteRepr for u64 {
+    unsafe fn load_atomic(ptr: *mut Self, ordering: Ordering) -> Self {
+        // SAFETY: The safety is upheld by the caller.
+        unsafe { AtomicU64::from_ptr(ptr).load(ordering) }
+    }
+    unsafe fn store_atomic(ptr: *mut Self, val: Self, ordering: Ordering) {
+        // SAFETY: The safety is upheld by the caller.
+        unsafe { AtomicU64::from_ptr(ptr).store(val, ordering) }
     }
 }
 
@@ -585,22 +643,20 @@ pub(crate) unsafe trait PteTrait:
 ///
 /// # Safety
 ///
-/// The safety preconditions are same as those of [`AtomicUsize::from_ptr`].
+/// The safety preconditions are same as those of `Atomic*::from_ptr`.
 pub unsafe fn load_pte<E: PteTrait>(ptr: *mut E, ordering: Ordering) -> E {
     // SAFETY: The safety is upheld by the caller.
-    let atomic = unsafe { AtomicUsize::from_ptr(ptr.cast()) };
-    let pte_raw = atomic.load(ordering);
-    E::from_usize(pte_raw)
+    let pte_raw = unsafe { E::Repr::load_atomic(ptr.cast(), ordering) };
+    E::from_raw(pte_raw)
 }
 
 /// Stores a page table entry with an atomic instruction.
 ///
 /// # Safety
 ///
-/// The safety preconditions are same as those of [`AtomicUsize::from_ptr`].
+/// The safety preconditions are same as those of `Atomic*::from_ptr`.
 pub unsafe fn store_pte<E: PteTrait>(ptr: *mut E, new_val: E, ordering: Ordering) {
-    let new_raw = new_val.as_usize();
+    let new_raw = new_val.as_raw();
     // SAFETY: The safety is upheld by the caller.
-    let atomic = unsafe { AtomicUsize::from_ptr(ptr.cast()) };
-    atomic.store(new_raw, ordering)
+    unsafe { E::Repr::store_atomic(ptr.cast(), new_raw, ordering) }
 }

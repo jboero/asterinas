@@ -20,6 +20,8 @@ pub enum Arch {
     X86_64,
     #[serde(rename = "loongarch64")]
     LoongArch64,
+    #[serde(rename = "arm")]
+    Arm,
 }
 
 impl ValueEnum for Arch {
@@ -29,6 +31,7 @@ impl ValueEnum for Arch {
             Arch::RiscV64,
             Arch::X86_64,
             Arch::LoongArch64,
+            Arch::Arm,
         ]
     }
 
@@ -38,6 +41,7 @@ impl ValueEnum for Arch {
             Arch::RiscV64 => Some(PossibleValue::new(self.to_str())),
             Arch::X86_64 => Some(PossibleValue::new(self.to_str())),
             Arch::LoongArch64 => Some(PossibleValue::new(self.to_str())),
+            Arch::Arm => Some(PossibleValue::new(self.to_str())),
         }
     }
 }
@@ -50,6 +54,7 @@ impl Arch {
             Arch::RiscV64 => "riscv64imac-unknown-none-elf",
             Arch::X86_64 => "x86_64-unknown-none",
             Arch::LoongArch64 => "loongarch64-unknown-none-softfloat",
+            Arch::Arm => "armv7a-none-eabi",
         }
     }
 
@@ -59,6 +64,7 @@ impl Arch {
             Arch::RiscV64 => "qemu-system-riscv64",
             Arch::X86_64 => "qemu-system-x86_64",
             Arch::LoongArch64 => "qemu-system-loongarch64",
+            Arch::Arm => "qemu-system-arm",
         }
     }
 
@@ -68,6 +74,7 @@ impl Arch {
             Arch::RiscV64 => "riscv64",
             Arch::X86_64 => "x86_64",
             Arch::LoongArch64 => "loongarch64",
+            Arch::Arm => "arm",
         }
     }
 }
@@ -89,6 +96,7 @@ pub fn get_default_arch() -> Arch {
             "riscv64" => Arch::RiscV64,
             "x86_64" => Arch::X86_64,
             "loongarch64" => Arch::LoongArch64,
+            "arm" => Arch::Arm,
             _ => panic!(
                 "The environment variable `OSDK_TARGET_ARCH` specifies an unsupported native architecture"
             ),

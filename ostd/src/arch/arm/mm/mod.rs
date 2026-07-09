@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Page table entry and memory management for AArch64 (VMSAv8-64, 4 KiB
-//! granule, 4-level, 48-bit virtual addresses).
+//! Page table entry and memory management for ARMv7-A with the Large Physical
+//! Address Extension (LPAE): 4 KiB granule, 3-level long-descriptor tables, a
+//! 32-bit virtual address space and up to 40-bit physical addresses.
+//!
+//! The LPAE long-descriptor format is deliberately close to AArch64's
+//! VMSAv8-64 stage-1 descriptors, so this mirrors `arch::aarch64::mm`. The two
+//! salient differences are:
+//!  - descriptors are 64-bit even though the pointer/`usize` width is 32-bit, so
+//!    [`PageTableEntry`] wraps a [`u64`] and sets `PteTrait::Repr = u64`; and
+//!  - system registers are accessed through the CP15 coprocessor
+//!    (`mcr`/`mrc`/`mcrr`/`mrrc`) rather than AArch64 `msr`/`mrs`.
 
 use core::ops::Range;
 
@@ -25,40 +34,44 @@ pub(crate) struct PagingConsts {}
 
 impl PagingConstsTrait for PagingConsts {
     const BASE_PAGE_SIZE: usize = 4096;
-    const NR_LEVELS: PagingLevel = 4;
-    const ADDRESS_WIDTH: usize = 48;
-    const VA_SIGN_EXT: bool = true;
-    // Blocks are permitted at AArch64 translation levels 1 (1 GiB) and 2
-    // (2 MiB) but not level 0. In Asterinas numbering (level 1 = base page,
-    // level 4 = root), that is level 3 and below.
-    const HIGHEST_TRANSLATION_LEVEL: PagingLevel = 3;
+    // LPAE with a 32-bit VA is a 3-level walk: level 3 (Asterinas root) is the
+    // LPAE level 1 (only 4 entries used, 1 GiB each), level 2 is LPAE level 2
+    // (2 MiB blocks) and level 1 is LPAE level 3 (4 KiB pages).
+    const NR_LEVELS: PagingLevel = 3;
+    const ADDRESS_WIDTH: usize = 32;
+    const VA_SIGN_EXT: bool = false;
+    // Allow 4 KiB pages (level 1) and 2 MiB blocks (level 2). We do not use
+    // 1 GiB blocks at the root level.
+    const HIGHEST_TRANSLATION_LEVEL: PagingLevel = 2;
     const PTE_SIZE: usize = size_of::<PageTableEntry>();
 }
 
 /// The MAIR attribute index for Normal write-back memory.
-const MAIR_IDX_NORMAL: usize = 0;
+const MAIR_IDX_NORMAL: u64 = 0;
 /// The MAIR attribute index for Device-nGnRnE memory.
-const MAIR_IDX_DEVICE: usize = 1;
+const MAIR_IDX_DEVICE: u64 = 1;
 
-// Descriptor bit positions (VMSAv8-64 stage-1, 4 KiB granule).
-const PTE_VALID: usize = 1 << 0;
-/// At levels 0-2: 1 = table, 0 = block. At level 3: must be 1 for a page.
-const PTE_TABLE_OR_PAGE: usize = 1 << 1;
-const PTE_ATTR_INDX_SHIFT: usize = 2;
-const PTE_AP_EL0: usize = 1 << 6; // AP[1]: allow EL0 access
-const PTE_AP_RO: usize = 1 << 7; // AP[2]: read-only
-const PTE_SH_INNER: usize = 0b11 << 8;
-const PTE_AF: usize = 1 << 10; // access flag
-const PTE_NG: usize = 1 << 11; // not global
-const PTE_PXN: usize = 1 << 53; // privileged execute never
-const PTE_UXN: usize = 1 << 54; // unprivileged execute never
+// Long-descriptor bit positions (LPAE stage-1, 4 KiB granule). These match the
+// AArch64 stage-1 layout.
+const PTE_VALID: u64 = 1 << 0;
+/// At levels 1-2: 1 = table, 0 = block. At level 3 (page): must be 1.
+const PTE_TABLE_OR_PAGE: u64 = 1 << 1;
+const PTE_ATTR_INDX_SHIFT: u64 = 2;
+const PTE_AP_EL0: u64 = 1 << 6; // AP[1]: allow unprivileged (PL0) access
+const PTE_AP_RO: u64 = 1 << 7; // AP[2]: read-only
+const PTE_SH_INNER: u64 = 0b11 << 8;
+const PTE_AF: u64 = 1 << 10; // access flag
+const PTE_NG: u64 = 1 << 11; // not global
+const PTE_PXN: u64 = 1 << 53; // privileged execute never
+const PTE_UXN: u64 = 1 << 54; // unprivileged execute never
 // Software-reserved bits [58:55] used to carry Asterinas metadata.
-const PTE_SW_DIRTY: usize = 1 << 55;
-const PTE_SW_PG_AVAIL1: usize = 1 << 56;
-const PTE_SW_PG_AVAIL2: usize = 1 << 57;
-const PTE_SW_PRIV_AVAIL1: usize = 1 << 58;
+const PTE_SW_DIRTY: u64 = 1 << 55;
+const PTE_SW_PG_AVAIL1: u64 = 1 << 56;
+const PTE_SW_PG_AVAIL2: u64 = 1 << 57;
+const PTE_SW_PRIV_AVAIL1: u64 = 1 << 58;
 
-const PTE_ADDR_MASK: usize = 0x0000_ffff_ffff_f000;
+/// Output-address mask: LPAE physical addresses are up to 40 bits.
+const PTE_ADDR_MASK: u64 = 0x0000_00ff_ffff_f000;
 
 fn tlbi_barrier_before() {
     // SAFETY: A data-synchronization barrier has no memory-safety implications.
@@ -72,12 +85,13 @@ fn tlbi_barrier_after() {
 
 pub(crate) fn tlb_flush_addr(vaddr: Vaddr) {
     tlbi_barrier_before();
-    // `tlbi vaae1is` invalidates by VA for all ASIDs, inner-shareable.
+    // TLBIMVAAIS: invalidate unified TLB by MVA, all ASIDs, inner-shareable
+    // (`mcr p15, 0, Rt, c8, c3, 3`). The MVA is the page-aligned virtual address.
     // SAFETY: Invalidating the TLB is always safe.
     unsafe {
         core::arch::asm!(
-            "tlbi vaae1is, {}",
-            in(reg) (vaddr >> 12) & 0xffff_ffff_ffff,
+            "mcr p15, 0, {}, c8, c3, 3",
+            in(reg) vaddr & !0xfff,
             options(nostack, preserves_flags),
         )
     };
@@ -92,18 +106,20 @@ pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
 
 pub(crate) fn tlb_flush_all_excluding_global() {
     tlbi_barrier_before();
+    // TLBIALLIS: invalidate entire unified TLB, inner-shareable.
     // SAFETY: Invalidating the TLB is always safe.
-    unsafe { core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!(
+            "mcr p15, 0, {}, c8, c3, 0",
+            in(reg) 0usize,
+            options(nostack, preserves_flags),
+        )
+    };
     tlbi_barrier_after();
 }
 
 pub(crate) fn tlb_flush_all_including_global() {
-    tlbi_barrier_before();
-    // `vmalle1is` invalidates all stage-1 EL1&0 entries (including global) for
-    // the current VMID, inner-shareable. (`alle1is` is an EL2-only operation.)
-    // SAFETY: Invalidating the TLB is always safe.
-    unsafe { core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags)) };
-    tlbi_barrier_after();
+    tlb_flush_all_excluding_global();
 }
 
 pub(crate) fn can_sync_dma() -> bool {
@@ -116,17 +132,18 @@ pub(crate) fn can_sync_dma() -> bool {
 /// The caller must ensure that the virtual address range and DMA direction
 /// correspond correctly to a DMA region and that `can_sync_dma()` is `true`.
 pub(crate) unsafe fn sync_dma_range<D: DmaDirection>(_range: Range<Vaddr>) {
-    // TODO: Implement `DC CVAC`/`DC IVAC` cache maintenance for non-coherent
-    // DMA. Currently unreachable because `can_sync_dma()` returns `false`.
+    // TODO: Implement cache maintenance for non-coherent DMA. Currently
+    // unreachable because `can_sync_dma()` returns `false`.
     unreachable!("cache maintenance for non-coherent DMA is not implemented");
 }
 
 /// Activates the given root-level page table.
 ///
-/// On AArch64 the low (user) half is translated through `TTBR0_EL1` and the
-/// high (kernel) half through `TTBR1_EL1`. Asterinas maintains a single 512-entry
-/// root whose low indices describe user space and high indices describe kernel
-/// space, so we point both translation-table base registers at it.
+/// LPAE splits translation between `TTBR0` (low VA) and `TTBR1` (high VA) via
+/// `TTBCR`. Asterinas maintains a single root whose low entries describe user
+/// space and whose high entries describe kernel space, so we configure `TTBCR`
+/// with `T0SZ = 0` at boot (making `TTBR0` cover the entire 4 GiB) and point
+/// `TTBR0` at the single root; `TTBR1` is unused.
 ///
 /// # Safety
 ///
@@ -136,40 +153,50 @@ pub(crate) unsafe fn activate_page_table(root_paddr: Paddr, _root_pt_cache: Cach
     assert!(root_paddr.is_multiple_of(PagingConsts::BASE_PAGE_SIZE));
 
     // SAFETY: The caller guarantees that `root_paddr` refers to a valid root
-    // page table describing a memory-safe address space.
+    // page table describing a memory-safe address space. `mcrr ... c2` writes
+    // the 64-bit `TTBR0`; the high half is zero since our PAs are below 4 GiB.
     unsafe {
         core::arch::asm!(
-            "msr ttbr0_el1, {root}",
-            "msr ttbr1_el1, {root}",
+            "mcrr p15, 0, {root}, {zero}, c2", // TTBR0 = root_paddr
             "dsb ish",
-            "tlbi vmalle1is",
+            "mcr p15, 0, {zero}, c8, c3, 0",   // TLBIALLIS
             "dsb ish",
             "isb",
             root = in(reg) root_paddr,
+            zero = in(reg) 0usize,
             options(nostack, preserves_flags),
         )
     };
 }
 
 pub(crate) fn current_page_table_paddr() -> Paddr {
-    let ttbr0: usize;
-    // SAFETY: Reading `TTBR0_EL1` has no side effects.
-    unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0, options(nostack, nomem)) };
-    ttbr0 & PTE_ADDR_MASK
+    let ttbr0_lo: usize;
+    let _ttbr0_hi: usize;
+    // SAFETY: Reading `TTBR0` has no side effects. `mrrc ... c2` reads the
+    // 64-bit `TTBR0` into a register pair.
+    unsafe {
+        core::arch::asm!(
+            "mrrc p15, 0, {lo}, {hi}, c2",
+            lo = out(reg) ttbr0_lo,
+            hi = out(reg) _ttbr0_hi,
+            options(nostack, nomem),
+        )
+    };
+    ttbr0_lo & (PTE_ADDR_MASK as usize)
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod)]
-pub(crate) struct PageTableEntry(usize);
+pub(crate) struct PageTableEntry(u64);
 
 impl PageTableEntry {
     fn paddr(&self) -> Paddr {
-        self.0 & PTE_ADDR_MASK
+        (self.0 & PTE_ADDR_MASK) as Paddr
     }
 
     /// Whether this entry is a leaf (block/page) rather than a next-level table.
     fn is_last(&self, level: PagingLevel) -> bool {
-        // Level 1 (base page, AArch64 L3): a valid entry is always a page.
+        // Level 1 (LPAE L3): a valid entry is always a page.
         // Higher levels: bit 1 clear means a block (leaf); set means a table.
         level == 1 || (self.0 & PTE_TABLE_OR_PAGE) == 0
     }
@@ -239,9 +266,9 @@ impl PageTableEntry {
     }
 
     fn new_page(paddr: Paddr, level: PagingLevel, prop: PageProperty) -> Self {
-        let mut raw = (paddr & PTE_ADDR_MASK) | PTE_VALID | PTE_AF;
+        let mut raw = (paddr as u64 & PTE_ADDR_MASK) | PTE_VALID | PTE_AF;
 
-        // Level 1 (AArch64 L3) leaves are pages and must set bit 1; blocks at
+        // Level 1 (LPAE L3) leaves are pages and must set bit 1; blocks at
         // higher levels leave it clear.
         if level == 1 {
             raw |= PTE_TABLE_OR_PAGE;
@@ -259,12 +286,12 @@ impl PageTableEntry {
 
         // Execute-never bits: forbid execution wherever it is not requested.
         if is_user {
-            raw |= PTE_PXN; // never executable at EL1
+            raw |= PTE_PXN; // never executable at PL1
             if !executable {
                 raw |= PTE_UXN;
             }
         } else {
-            raw |= PTE_UXN; // never executable at EL0
+            raw |= PTE_UXN; // never executable at PL0
             if !executable {
                 raw |= PTE_PXN;
             }
@@ -299,7 +326,7 @@ impl PageTableEntry {
     }
 
     fn new_pt(paddr: Paddr, flags: PageTableFlags) -> Self {
-        let mut raw = (paddr & PTE_ADDR_MASK) | PTE_VALID | PTE_TABLE_OR_PAGE;
+        let mut raw = (paddr as u64 & PTE_ADDR_MASK) | PTE_VALID | PTE_TABLE_OR_PAGE;
         if flags.contains(PageTableFlags::AVAIL1) {
             raw |= PTE_SW_PG_AVAIL1;
         }
@@ -313,11 +340,12 @@ impl PageTableEntry {
 impl PodOnce for PageTableEntry {}
 
 // SAFETY: The implementation is correct because:
-//  - `from_usize`/`into_usize` are not overridden;
+//  - `from_raw`/`as_raw` are not overridden;
 //  - `from_repr`/`to_repr` are inverse operations at a given level;
 //  - a zeroed PTE (bit 0 clear) represents an absent entry.
 unsafe impl PteTrait for PageTableEntry {
-    type Repr = usize;
+    // LPAE descriptors are 64-bit even though `usize` is 32-bit.
+    type Repr = u64;
 
     fn from_repr(repr: &PteScalar, level: PagingLevel) -> Self {
         match repr {

@@ -65,16 +65,30 @@ use crate::{
 // The shortest supported address width is 39 bits. So the literal
 // values are written for 39 bits address width and we adjust the values
 // by arithmetic left shift.
+//
+// ARMv7-A (`target_arch = "arm"`) is the exception: it has a 32-bit virtual
+// address space, so it defines its own explicit 32-bit layout below rather than
+// sharing the 39-bit-derived one. See the `arm` blocks throughout this module.
+#[cfg(not(target_arch = "arm"))]
 const_assert!(PagingConsts::ADDRESS_WIDTH >= 39);
+#[cfg(not(target_arch = "arm"))]
 const ADDR_WIDTH_SHIFT: usize = PagingConsts::ADDRESS_WIDTH - 39;
 
 /// Start of the kernel address space.
-#[cfg(not(target_arch = "loongarch64"))]
+#[cfg(not(any(target_arch = "loongarch64", target_arch = "arm")))]
 pub const KERNEL_BASE_VADDR: Vaddr = 0xffff_ffc0_0000_0000 << ADDR_WIDTH_SHIFT;
 #[cfg(target_arch = "loongarch64")]
 pub const KERNEL_BASE_VADDR: Vaddr = 0x9000_0000_0000_0000;
+// ARMv7-A: a 2 GiB/2 GiB user/kernel split. The kernel half begins on the 1 GiB
+// LPAE root-index boundary (index 2), which keeps user and kernel in disjoint
+// top-level table entries.
+#[cfg(target_arch = "arm")]
+pub const KERNEL_BASE_VADDR: Vaddr = 0x8000_0000;
 /// End of the kernel address space (non inclusive).
+#[cfg(not(target_arch = "arm"))]
 pub const KERNEL_END_VADDR: Vaddr = 0xffff_ffff_ffff_0000;
+#[cfg(target_arch = "arm")]
+pub const KERNEL_END_VADDR: Vaddr = 0xffff_0000;
 
 /// The maximum virtual address of user space (non inclusive).
 ///
@@ -85,7 +99,11 @@ pub const KERNEL_END_VADDR: Vaddr = 0xffff_ffff_ffff_0000;
 /// for some x86_64 CPUs' bugs. See
 /// <https://github.com/torvalds/linux/blob/480e035fc4c714fb5536e64ab9db04fedc89e910/arch/x86/include/asm/page_64.h#L68-L78>
 /// for the rationale.
+#[cfg(not(target_arch = "arm"))]
 pub const MAX_USERSPACE_VADDR: Vaddr = (0x0000_0040_0000_0000 << ADDR_WIDTH_SHIFT) - PAGE_SIZE;
+// ARMv7-A: user space is the low 2 GiB (translated through `TTBR0`).
+#[cfg(target_arch = "arm")]
+pub const MAX_USERSPACE_VADDR: Vaddr = 0x8000_0000 - PAGE_SIZE;
 
 /// The kernel address space.
 ///
@@ -110,21 +128,44 @@ const KERNEL_CODE_BASE_VADDR: usize = 0xffff_ffff_0000_0000;
 const KERNEL_CODE_BASE_VADDR: usize = 0x9000_0000_0000_0000;
 #[cfg(target_arch = "aarch64")]
 const KERNEL_CODE_BASE_VADDR: usize = 0xffff_ffff_0000_0000;
+// ARMv7-A: the kernel image runs inside the linear mapping, so its code base is
+// the linear-mapping offset. Phys 0x4020_0000 maps to virt 0xC020_0000.
+#[cfg(target_arch = "arm")]
+const KERNEL_CODE_BASE_VADDR: usize = 0x8000_0000;
 
+#[cfg(not(target_arch = "arm"))]
 const FRAME_METADATA_CAP_VADDR: Vaddr = 0xffff_fff0_8000_0000 << ADDR_WIDTH_SHIFT;
+#[cfg(not(target_arch = "arm"))]
 const FRAME_METADATA_BASE_VADDR: Vaddr = 0xffff_fff0_0000_0000 << ADDR_WIDTH_SHIFT;
+// ARMv7-A 32-bit kernel layout (all within 0x8000_0000..=0xFFFF_FFFF):
+//   linear map      0x8000_0000 .. 0xE000_0000  (phys 0 .. 0x6000_0000)
+//   vmalloc/ioremap 0xE000_0000 .. 0xF800_0000
+//   frame metadata  0xF800_0000 .. 0xFE00_0000
+#[cfg(target_arch = "arm")]
+const FRAME_METADATA_CAP_VADDR: Vaddr = 0xFE00_0000;
+#[cfg(target_arch = "arm")]
+const FRAME_METADATA_BASE_VADDR: Vaddr = 0xF800_0000;
 pub(in crate::mm) const FRAME_METADATA_RANGE: Range<Vaddr> =
     FRAME_METADATA_BASE_VADDR..FRAME_METADATA_CAP_VADDR;
 
+#[cfg(not(target_arch = "arm"))]
 const VMALLOC_BASE_VADDR: Vaddr = 0xffff_ffe0_0000_0000 << ADDR_WIDTH_SHIFT;
+#[cfg(target_arch = "arm")]
+const VMALLOC_BASE_VADDR: Vaddr = 0xE000_0000;
 pub const VMALLOC_VADDR_RANGE: Range<Vaddr> = VMALLOC_BASE_VADDR..FRAME_METADATA_BASE_VADDR;
 
 /// The base address of the linear mapping of all physical
 /// memory in the kernel address space.
-#[cfg(not(target_arch = "loongarch64"))]
+#[cfg(not(any(target_arch = "loongarch64", target_arch = "arm")))]
 pub const LINEAR_MAPPING_BASE_VADDR: Vaddr = 0xffff_ffc0_0000_0000 << ADDR_WIDTH_SHIFT;
 #[cfg(target_arch = "loongarch64")]
 pub const LINEAR_MAPPING_BASE_VADDR: Vaddr = 0x9000_0000_0000_0000;
+// ARMv7-A: the linear map begins at physical address 0, offset into the kernel
+// half. So `paddr_to_vaddr(pa) = pa + 0x8000_0000`, exactly as on the 64-bit
+// arches (offset equals range start), and MMIO (e.g. the PL011 at 0x0900_0000)
+// is reachable through it just like RAM.
+#[cfg(target_arch = "arm")]
+pub const LINEAR_MAPPING_BASE_VADDR: Vaddr = 0x8000_0000;
 pub const LINEAR_MAPPING_VADDR_RANGE: Range<Vaddr> = LINEAR_MAPPING_BASE_VADDR..VMALLOC_BASE_VADDR;
 
 /// Convert physical address to virtual address using offset, only available inside `ostd`
@@ -147,7 +188,13 @@ pub(super) struct KernelPtConfig {}
 // `item_ref_from_raw` are correctly implemented with respect to the `Item` and
 // `ItemRef` types.
 unsafe impl PageTableConfig for KernelPtConfig {
+    // On 64-bit arches the 512-entry root splits 256/256 (user/kernel). On
+    // ARMv7-A LPAE the root (level 3) has only 4 populated entries, each mapping
+    // 1 GiB; the kernel half (0x8000_0000..=0xFFFF_FFFF) is entries 2 and 3.
+    #[cfg(not(target_arch = "arm"))]
     const TOP_LEVEL_INDEX_RANGE: Range<usize> = 256..512;
+    #[cfg(target_arch = "arm")]
+    const TOP_LEVEL_INDEX_RANGE: Range<usize> = 2..4;
     const TOP_LEVEL_CAN_UNMAP: bool = false;
 
     type E = PageTableEntry;
