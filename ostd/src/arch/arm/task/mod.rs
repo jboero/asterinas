@@ -23,39 +23,33 @@ impl TaskContext {
     }
 }
 
-/// Callee-saved registers (`x19`-`x29`) and the stack pointer.
+/// Callee-saved registers (`r4`-`r11`) and the stack pointer.
 #[repr(C)]
 #[derive(Clone, Debug)]
 struct CalleeRegs {
-    sp: u64,
-    x19: u64,
-    x20: u64,
-    x21: u64,
-    x22: u64,
-    x23: u64,
-    x24: u64,
-    x25: u64,
-    x26: u64,
-    x27: u64,
-    x28: u64,
-    x29: u64,
+    sp: usize,
+    r4: usize,
+    r5: usize,
+    r6: usize,
+    r7: usize,
+    r8: usize,
+    r9: usize,
+    r10: usize,
+    r11: usize,
 }
 
 impl CalleeRegs {
     const fn new() -> Self {
         CalleeRegs {
             sp: 0,
-            x19: 0,
-            x20: 0,
-            x21: 0,
-            x22: 0,
-            x23: 0,
-            x24: 0,
-            x25: 0,
-            x26: 0,
-            x27: 0,
-            x28: 0,
-            x29: 0,
+            r4: 0,
+            r5: 0,
+            r6: 0,
+            r7: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
         }
     }
 }
@@ -66,7 +60,7 @@ impl TaskContextApi for TaskContext {
     }
 
     fn set_stack_pointer(&mut self, sp: usize) {
-        self.regs.sp = sp as u64;
+        self.regs.sp = sp;
     }
 }
 

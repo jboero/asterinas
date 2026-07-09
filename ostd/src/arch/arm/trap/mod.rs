@@ -7,10 +7,15 @@ mod trap;
 
 use spin::Once;
 pub use trap::TrapFrame;
-pub(in crate::arch) use trap::{RawUserContext, TRAP_KIND_IRQ};
+pub(in crate::arch) use trap::{
+    RawUserContext, TRAP_KIND_DATA_ABORT, TRAP_KIND_IRQ, TRAP_KIND_PREFETCH_ABORT,
+    TRAP_KIND_SYSCALL, TRAP_KIND_UNDEF,
+};
 
 use crate::{
-    arch::cpu::context::CpuException, cpu::PrivilegeLevel, ex_table::ExTable,
+    arch::cpu::context::{CpuException, FaultInfo},
+    cpu::PrivilegeLevel,
+    ex_table::ExTable,
     mm::MAX_USERSPACE_VADDR,
 };
 
@@ -26,47 +31,44 @@ pub(crate) unsafe fn init_on_cpu() {
     unsafe { trap::init_on_cpu() };
 }
 
-/// Handles a synchronous exception (or SError) taken from the kernel.
+/// Handles a data abort taken from the kernel.
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn trap_handler(f: &mut TrapFrame) {
-    let exception = CpuException::new(f.esr, read_far());
+unsafe extern "C" fn kernel_data_abort_handler(f: &mut TrapFrame) {
+    let info = FaultInfo {
+        far: f.far,
+        fsr: f.fsr,
+    };
+    handle_kernel_abort(f, CpuException::DataAbort(info), info);
+}
 
-    match exception {
-        CpuException::InstructionAbort(info) | CpuException::DataAbort(info)
-            if info.is_page_fault() =>
-        {
-            let fault_addr = info.far;
-            if (0..MAX_USERSPACE_VADDR).contains(&fault_addr) {
-                handle_user_page_fault(f, &exception);
-            } else {
-                panic!(
-                    "Cannot handle kernel page fault, exception: {:#x?}, trapframe: {:#x?}.",
-                    exception, f
-                );
-            }
-        }
-        _ => {
-            panic!(
-                "Cannot handle kernel exception, exception: {:#x?}, trapframe: {:#x?}.",
-                exception, f
-            );
-        }
+/// Handles a prefetch abort taken from the kernel.
+// SAFETY: The name does not collide with other symbols.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn kernel_prefetch_abort_handler(f: &mut TrapFrame) {
+    let info = FaultInfo {
+        far: f.far,
+        fsr: f.fsr,
+    };
+    handle_kernel_abort(f, CpuException::InstructionAbort(info), info);
+}
+
+fn handle_kernel_abort(f: &mut TrapFrame, exception: CpuException, info: FaultInfo) {
+    if info.is_page_fault() && (0..MAX_USERSPACE_VADDR).contains(&info.far) {
+        handle_user_page_fault(f, &exception);
+    } else {
+        panic!(
+            "Cannot handle kernel exception, exception: {:#x?}, trapframe: {:#x?}.",
+            exception, f
+        );
     }
 }
 
-/// Handles an IRQ/FIQ taken from the kernel.
+/// Handles an IRQ taken from the kernel.
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn irq_handler(f: &mut TrapFrame) {
     super::irq::handle_irq(f, PrivilegeLevel::Kernel);
-}
-
-fn read_far() -> usize {
-    let far;
-    // SAFETY: Reading `FAR_EL1` has no side effects.
-    unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nostack, nomem)) };
-    far
 }
 
 #[expect(clippy::type_complexity)]
@@ -87,9 +89,10 @@ fn handle_user_page_fault(f: &mut TrapFrame, exception: &CpuException) {
         return;
     }
 
-    // Recover through the exception table if possible.
-    if let Some(addr) = ExTable::find_recovery_inst_addr(f.elr) {
-        f.elr = addr;
+    // Recover through the exception table if possible. `r[15]` is the faulting
+    // PC saved in the trap frame.
+    if let Some(addr) = ExTable::find_recovery_inst_addr(f.general.r[15]) {
+        f.general.r[15] = addr;
     } else {
         panic!(
             "Failed to handle page fault, exception: {:?}, trapframe: {:#x?}.",

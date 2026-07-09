@@ -7,16 +7,18 @@
 
 use crate::power::{ExitCode, inject_poweroff_handler, inject_restart_handler};
 
-const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
-const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+// 32-bit PSCI function IDs (SMC32/HVC32 calling convention).
+const PSCI_SYSTEM_OFF: u32 = 0x8400_0008;
+const PSCI_SYSTEM_RESET: u32 = 0x8400_0009;
 
-fn psci_call(function: u64) {
+fn psci_call(function: u32) {
     // SAFETY: Issuing a PSCI call has no memory-safety implications; on success
     // it does not return.
     unsafe {
         core::arch::asm!(
+            ".arch_extension virt",
             "hvc #0",
-            in("x0") function,
+            in("r0") function,
             options(nostack, nomem),
         );
     }

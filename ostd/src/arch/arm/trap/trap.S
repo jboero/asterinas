@@ -1,273 +1,230 @@
 /* SPDX-License-Identifier: MPL-2.0 */
 
-// AArch64 exception vectors and trap entry/exit.
+// ARMv7-A exception vectors and trap entry/exit.
 //
-// The kernel `TrapFrame` saved on the stack has this layout (see `trap.rs`):
-//   0x000 : x0..x30        (31 * 8 bytes)
-//   0x0f8 : sp             (SP at the point of exception)
-//   0x100 : elr_el1
-//   0x108 : spsr_el1
-//   0x110 : esr_el1
-// The frame is rounded up to 0x120 bytes for 16-byte stack alignment.
+// The single `RawUserContext`/`TrapFrame` layout (see `trap.rs`) is:
+//   0x00: r0-r15   (16 * 4 = 64 bytes; r13/r14/r15 = user sp/lr/pc)
+//   0x40: cpsr
+//   0x44: tls            (RawUserContext only)
+//   0x48: fsr
+//   0x4C: far
+//   0x50: trap_kind      (RawUserContext only)
+//
+// User entry/exit uses two globals (valid for the current single-core boot;
+// TODO: make these CPU-local for SMP):
+//   RUN_USER_KERNEL_SP  - the SVC sp holding run_user's saved kernel frame
+//   RUN_USER_CTX_PTR    - pointer to the active `RawUserContext`
+
+.arch armv7-a
+
+// trap_kind values (must match trap.rs).
+.equ TK_SYSCALL,        0
+.equ TK_IRQ,            1
+.equ TK_DATA_ABORT,     2
+.equ TK_PREFETCH_ABORT, 3
+.equ TK_UNDEF,          4
 
 .section .text
 
-// ---- Kernel trap entry -----------------------------------------------------
-// Saves a full `TrapFrame`, calls `trap_handler`, restores, and returns.
-.macro SAVE_KERNEL_FRAME
-    sub     sp, sp, #0x120
-    stp     x0,  x1,  [sp, #0x00]
-    stp     x2,  x3,  [sp, #0x10]
-    stp     x4,  x5,  [sp, #0x20]
-    stp     x6,  x7,  [sp, #0x30]
-    stp     x8,  x9,  [sp, #0x40]
-    stp     x10, x11, [sp, #0x50]
-    stp     x12, x13, [sp, #0x60]
-    stp     x14, x15, [sp, #0x70]
-    stp     x16, x17, [sp, #0x80]
-    stp     x18, x19, [sp, #0x90]
-    stp     x20, x21, [sp, #0xa0]
-    stp     x22, x23, [sp, #0xb0]
-    stp     x24, x25, [sp, #0xc0]
-    stp     x26, x27, [sp, #0xd0]
-    stp     x28, x29, [sp, #0xe0]
-    str     x30,      [sp, #0xf0]
-    add     x0, sp, #0x120           // SP prior to the exception
-    str     x0,       [sp, #0xf8]
-    mrs     x0, elr_el1
-    mrs     x1, spsr_el1
-    mrs     x2, esr_el1
-    stp     x0, x1,   [sp, #0x100]
-    str     x2,       [sp, #0x110]
-.endm
-
-.macro RESTORE_KERNEL_FRAME
-    ldp     x0, x1,   [sp, #0x100]
-    msr     elr_el1, x0
-    msr     spsr_el1, x1
-    ldp     x0,  x1,  [sp, #0x00]
-    ldp     x2,  x3,  [sp, #0x10]
-    ldp     x4,  x5,  [sp, #0x20]
-    ldp     x6,  x7,  [sp, #0x30]
-    ldp     x8,  x9,  [sp, #0x40]
-    ldp     x10, x11, [sp, #0x50]
-    ldp     x12, x13, [sp, #0x60]
-    ldp     x14, x15, [sp, #0x70]
-    ldp     x16, x17, [sp, #0x80]
-    ldp     x18, x19, [sp, #0x90]
-    ldp     x20, x21, [sp, #0xa0]
-    ldp     x22, x23, [sp, #0xb0]
-    ldp     x24, x25, [sp, #0xc0]
-    ldp     x26, x27, [sp, #0xd0]
-    ldp     x28, x29, [sp, #0xe0]
-    ldr     x30,      [sp, #0xf0]
-    add     sp, sp, #0x120
-.endm
-
-// Synchronous exceptions and SError from the kernel.
-.global kernel_sync_entry
-.type kernel_sync_entry, @function
-kernel_sync_entry:
-    SAVE_KERNEL_FRAME
-    mov     x0, sp                    // &mut TrapFrame
-    bl      trap_handler
-    RESTORE_KERNEL_FRAME
-    eret
-.size kernel_sync_entry, .-kernel_sync_entry
-
-// IRQ/FIQ from the kernel.
-.global kernel_irq_entry
-.type kernel_irq_entry, @function
-kernel_irq_entry:
-    SAVE_KERNEL_FRAME
-    mov     x0, sp                    // &mut TrapFrame
-    bl      irq_handler
-    RESTORE_KERNEL_FRAME
-    eret
-.size kernel_irq_entry, .-kernel_irq_entry
-
-// ---- Enter userspace -------------------------------------------------------
-// `run_user(regs: *mut RawUserContext)` in x0.
-//
-// `RawUserContext` layout (see `trap.rs`):
-//   0x000 : x0..x30   (x_i at i*8)
-//   0x0f8 : sp        (SP_EL0)
-//   0x100 : elr       (ELR_EL1, user PC)
-//   0x108 : spsr      (SPSR_EL1)
-//   0x110 : tpidr     (TPIDR_EL0)
-//   0x118 : esr
-//   0x120 : far
-//   0x128 : trap_kind
-//
-// The kernel runs on SP_EL1 with SPSel=1, so SP_EL1 is preserved across the EL0
-// excursion: `run_user` saves the callee-saved registers and the `regs` pointer
-// on the kernel stack, and the user exception vectors find them there.
-.global run_user
-.type run_user, @function
-run_user:
-    stp     x19, x20, [sp, #-0x70]!
-    stp     x21, x22, [sp, #0x10]
-    stp     x23, x24, [sp, #0x20]
-    stp     x25, x26, [sp, #0x30]
-    stp     x27, x28, [sp, #0x40]
-    stp     x29, x30, [sp, #0x50]
-    str     x0,       [sp, #0x60]     // save `regs` pointer
-
-    mov     x18, x0                   // x18 = regs base (user x18 restored last)
-    ldr     x1, [x18, #0xf8]
-    msr     sp_el0, x1
-    ldr     x1, [x18, #0x100]
-    msr     elr_el1, x1
-    ldr     x1, [x18, #0x108]
-    msr     spsr_el1, x1
-    ldr     x1, [x18, #0x110]
-    msr     tpidr_el0, x1
-
-    ldp     x0, x1,   [x18, #0x00]
-    ldp     x2, x3,   [x18, #0x10]
-    ldp     x4, x5,   [x18, #0x20]
-    ldp     x6, x7,   [x18, #0x30]
-    ldp     x8, x9,   [x18, #0x40]
-    ldp     x10, x11, [x18, #0x50]
-    ldp     x12, x13, [x18, #0x60]
-    ldp     x14, x15, [x18, #0x70]
-    ldp     x16, x17, [x18, #0x80]
-    ldp     x19, x20, [x18, #0x98]
-    ldp     x21, x22, [x18, #0xa8]
-    ldp     x23, x24, [x18, #0xb8]
-    ldp     x25, x26, [x18, #0xc8]
-    ldp     x27, x28, [x18, #0xd8]
-    ldp     x29, x30, [x18, #0xe8]
-    ldr     x18,      [x18, #0x90]
-    eret
-.size run_user, .-run_user
-
-// ---- User exception return -------------------------------------------------
-// Saves the user register state into the `RawUserContext`, records the trap
-// kind, then restores the kernel context saved by `run_user` and returns to it.
-.macro USER_TRAP_RETURN kind
-    stp     x0, x1,   [sp, #-0x100]!
-    stp     x2, x3,   [sp, #0x10]
-    stp     x4, x5,   [sp, #0x20]
-    stp     x6, x7,   [sp, #0x30]
-    stp     x8, x9,   [sp, #0x40]
-    stp     x10, x11, [sp, #0x50]
-    stp     x12, x13, [sp, #0x60]
-    stp     x14, x15, [sp, #0x70]
-    stp     x16, x17, [sp, #0x80]
-    stp     x18, x19, [sp, #0x90]
-    stp     x20, x21, [sp, #0xa0]
-    stp     x22, x23, [sp, #0xb0]
-    stp     x24, x25, [sp, #0xc0]
-    stp     x26, x27, [sp, #0xd0]
-    stp     x28, x29, [sp, #0xe0]
-    str     x30,      [sp, #0xf0]
-
-    ldr     x0, [sp, #0x160]          // `regs` pointer from run_user's frame
-
-    ldp     x2, x3, [sp, #0x00]
-    stp     x2, x3, [x0, #0x00]
-    ldp     x2, x3, [sp, #0x10]
-    stp     x2, x3, [x0, #0x10]
-    ldp     x2, x3, [sp, #0x20]
-    stp     x2, x3, [x0, #0x20]
-    ldp     x2, x3, [sp, #0x30]
-    stp     x2, x3, [x0, #0x30]
-    ldp     x2, x3, [sp, #0x40]
-    stp     x2, x3, [x0, #0x40]
-    ldp     x2, x3, [sp, #0x50]
-    stp     x2, x3, [x0, #0x50]
-    ldp     x2, x3, [sp, #0x60]
-    stp     x2, x3, [x0, #0x60]
-    ldp     x2, x3, [sp, #0x70]
-    stp     x2, x3, [x0, #0x70]
-    ldp     x2, x3, [sp, #0x80]
-    stp     x2, x3, [x0, #0x80]
-    ldp     x2, x3, [sp, #0x90]
-    stp     x2, x3, [x0, #0x90]
-    ldp     x2, x3, [sp, #0xa0]
-    stp     x2, x3, [x0, #0xa0]
-    ldp     x2, x3, [sp, #0xb0]
-    stp     x2, x3, [x0, #0xb0]
-    ldp     x2, x3, [sp, #0xc0]
-    stp     x2, x3, [x0, #0xc0]
-    ldp     x2, x3, [sp, #0xd0]
-    stp     x2, x3, [x0, #0xd0]
-    ldp     x2, x3, [sp, #0xe0]
-    stp     x2, x3, [x0, #0xe0]
-    ldr     x2, [sp, #0xf0]
-    str     x2, [x0, #0xf0]
-
-    mrs     x2, sp_el0
-    str     x2, [x0, #0xf8]
-    mrs     x2, elr_el1
-    str     x2, [x0, #0x100]
-    mrs     x2, spsr_el1
-    str     x2, [x0, #0x108]
-    mrs     x2, tpidr_el0
-    str     x2, [x0, #0x110]
-    mrs     x2, esr_el1
-    str     x2, [x0, #0x118]
-    mrs     x2, far_el1
-    str     x2, [x0, #0x120]
-    mov     x2, #\kind
-    str     x2, [x0, #0x128]
-
-    add     sp, sp, #0x100            // pop the user save area
-
-    ldp     x19, x20, [sp, #0x00]
-    ldp     x21, x22, [sp, #0x10]
-    ldp     x23, x24, [sp, #0x20]
-    ldp     x25, x26, [sp, #0x30]
-    ldp     x27, x28, [sp, #0x40]
-    ldp     x29, x30, [sp, #0x50]
-    add     sp, sp, #0x70
-    ret
-.endm
-
-.global user_sync_entry
-.type user_sync_entry, @function
-user_sync_entry:
-    USER_TRAP_RETURN 0                // TRAP_KIND_SYNC
-.size user_sync_entry, .-user_sync_entry
-
-.global user_irq_entry
-.type user_irq_entry, @function
-user_irq_entry:
-    USER_TRAP_RETURN 1                // TRAP_KIND_IRQ
-.size user_irq_entry, .-user_irq_entry
-
-// ---- Exception vector table ------------------------------------------------
-// 16 entries, each occupying 0x80 bytes, aligned to 0x800.
-.macro VECTOR target
-    .balign 0x80
-    b       \target
-.endm
-
-.section .text
-.balign 0x800
+// ---- Exception vector table (installed into VBAR) --------------------------
+// Each entry is one instruction; we branch to the per-exception handler.
+.balign 32
 .global exception_vector_table
 exception_vector_table:
-    // Current EL with SP_EL0
-    VECTOR kernel_sync_entry          // Synchronous
-    VECTOR kernel_irq_entry           // IRQ
-    VECTOR kernel_irq_entry           // FIQ
-    VECTOR kernel_sync_entry          // SError
+    b       .                       // 0x00 Reset (unused)
+    b       vec_undef               // 0x04 Undefined instruction
+    b       vec_svc                 // 0x08 Supervisor call (SVC)
+    b       vec_prefetch_abort      // 0x0C Prefetch abort
+    b       vec_data_abort          // 0x10 Data abort
+    b       .                       // 0x14 (reserved)
+    b       vec_irq                 // 0x18 IRQ
+    b       .                       // 0x1C FIQ (unused)
 
-    // Current EL with SP_ELx
-    VECTOR kernel_sync_entry          // Synchronous
-    VECTOR kernel_irq_entry           // IRQ
-    VECTOR kernel_irq_entry           // FIQ
-    VECTOR kernel_sync_entry          // SError
+// ---- Save the user context and return through run_user ---------------------
+// Entered in the exception's mode with:
+//   r0-r12  = user r0-r12 (shared, not banked in this mode)
+//   lr      = mode-banked return address (already adjusted by the caller)
+//   spsr    = user CPSR
+//   the current mode's banked sp is a small scratch stack.
+// On entry `\kind` is the trap_kind to record.
+.macro SAVE_USER_AND_RETURN kind
+    // Free r0 as scratch using this mode's scratch stack.
+    str     r0, [sp, #-4]!
+    ldr     r0, =RUN_USER_CTX_PTR
+    ldr     r0, [r0]                // r0 = ctx pointer
+    stmib   r0, {{r1-r12}}            // ctx->r[1..12] = user r1-r12
+    ldr     r1, [sp], #4            // recover user r0
+    str     r1, [r0]               // ctx->r[0] = user r0
+    add     r1, r0, #(13 * 4)
+    stmia   r1, {{r13, r14}}^         // ctx->r[13],r[14] = user sp, lr (banked)
+    str     lr, [r0, #(15 * 4)]     // ctx->r[15] = user pc (adjusted lr)
+    mrs     r1, spsr
+    str     r1, [r0, #0x40]         // ctx->cpsr = user CPSR
+    mov     r1, #\kind
+    str     r1, [r0, #0x50]         // ctx->trap_kind
+    // Return to the kernel: switch to SVC, restore run_user's frame.
+    cps     #0x13                   // SVC mode
+    ldr     r1, =RUN_USER_KERNEL_SP
+    ldr     sp, [r1]
+    pop     {{r4-r11, lr}}
+    bx      lr
+.endm
 
-    // Lower EL, AArch64
-    VECTOR user_sync_entry            // Synchronous
-    VECTOR user_irq_entry             // IRQ
-    VECTOR user_irq_entry             // FIQ
-    VECTOR user_sync_entry            // SError
+// Records the current data/instruction fault status+address into the ctx.
+.macro SAVE_FAULT_INFO is_data
+    ldr     r0, =RUN_USER_CTX_PTR
+    ldr     r0, [r0]
+.if \is_data
+    mrc     p15, 0, r1, c5, c0, 0   // DFSR
+    mrc     p15, 0, r2, c6, c0, 0   // DFAR
+.else
+    mrc     p15, 0, r1, c5, c0, 1   // IFSR
+    mrc     p15, 0, r2, c6, c0, 2   // IFAR
+.endif
+    str     r1, [r0, #0x48]         // ctx->fsr
+    str     r2, [r0, #0x4C]         // ctx->far
+.endm
 
-    // Lower EL, AArch32 (unsupported)
-    VECTOR kernel_sync_entry          // Synchronous
-    VECTOR kernel_irq_entry           // IRQ
-    VECTOR kernel_irq_entry           // FIQ
-    VECTOR kernel_sync_entry          // SError
+// ---- Per-exception vectors -------------------------------------------------
+
+vec_svc:
+    // From user: LR_svc already points past the SVC. Kernel SVC (nested) is not
+    // expected during boot.
+    SAVE_USER_AND_RETURN TK_SYSCALL
+
+vec_irq:
+    sub     lr, lr, #4              // IRQ return address = LR - 4
+    // Distinguish user vs kernel by the saved mode in SPSR.
+    mrs     r0, spsr
+    and     r0, r0, #0x1f
+    cmp     r0, #0x10               // USR mode?
+    bne     kernel_irq_entry
+    SAVE_USER_AND_RETURN TK_IRQ
+
+vec_data_abort:
+    sub     lr, lr, #8              // data-abort return = LR - 8
+    mrs     r0, spsr
+    and     r0, r0, #0x1f
+    cmp     r0, #0x10
+    bne     kernel_abort_entry_data
+    SAVE_FAULT_INFO 1
+    SAVE_USER_AND_RETURN TK_DATA_ABORT
+
+vec_prefetch_abort:
+    sub     lr, lr, #4              // prefetch-abort return = LR - 4
+    mrs     r0, spsr
+    and     r0, r0, #0x1f
+    cmp     r0, #0x10
+    bne     kernel_abort_entry_prefetch
+    SAVE_FAULT_INFO 0
+    SAVE_USER_AND_RETURN TK_PREFETCH_ABORT
+
+vec_undef:
+    sub     lr, lr, #4              // return to the undefined instruction
+    mrs     r0, spsr
+    and     r0, r0, #0x1f
+    cmp     r0, #0x10
+    bne     .                       // kernel undefined instruction: hang
+    SAVE_USER_AND_RETURN TK_UNDEF
+
+// ---- Kernel-mode exception entries -----------------------------------------
+// Build a TrapFrame on the SVC stack, call the Rust handler, then restore.
+// Entered in the exception mode; `lr` already adjusted. We switch to SVC to run
+// on the kernel stack.
+
+kernel_irq_entry:
+    // Re-run through a frame builder from IRQ mode.
+    // Save minimal frame: build TrapFrame then call irq_handler.
+    // (lr already = return-4, spsr = kernel CPSR.)
+    srsdb   sp!, #0x13
+    cps     #0x13
+    sub     sp, sp, #(4 * 4)        // space for cpsr,fsr,far and alignment
+    push    {{r0-r12}}
+    // r0 = &TrapFrame (points at saved r0)
+    mov     r0, sp
+    bl      irq_handler
+    pop     {{r0-r12}}
+    add     sp, sp, #(4 * 4)
+    rfeia   sp!                     // restore {{pc, cpsr}} from SVC stack
+
+kernel_abort_entry_data:
+    srsdb   sp!, #0x13
+    cps     #0x13
+    sub     sp, sp, #(4 * 4)
+    push    {{r0-r12}}
+    mov     r0, sp
+    bl      kernel_data_abort_handler
+    pop     {{r0-r12}}
+    add     sp, sp, #(4 * 4)
+    rfeia   sp!
+
+kernel_abort_entry_prefetch:
+    srsdb   sp!, #0x13
+    cps     #0x13
+    sub     sp, sp, #(4 * 4)
+    push    {{r0-r12}}
+    mov     r0, sp
+    bl      kernel_prefetch_abort_handler
+    pop     {{r0-r12}}
+    add     sp, sp, #(4 * 4)
+    rfeia   sp!
+
+// ---- run_user(regs) --------------------------------------------------------
+// r0 = &RawUserContext. Saves the kernel state, enters USR mode, and returns
+// here (via the vectors) when the user traps back.
+.global run_user
+.type run_user, %function
+run_user:
+    push    {{r4-r11, lr}}
+    ldr     r1, =RUN_USER_KERNEL_SP
+    str     sp, [r1]
+    ldr     r1, =RUN_USER_CTX_PTR
+    str     r0, [r1]
+
+    ldr     r1, [r0, #0x40]         // user CPSR
+    msr     spsr_cxsf, r1
+    ldr     r1, [r0, #0x44]         // user TLS
+    mcr     p15, 0, r1, c13, c0, 2  // TPIDRURW
+
+    add     r1, r0, #(13 * 4)
+    ldmia   r1, {{r13, r14}}^         // load user sp, lr into USR-banked regs
+    ldr     lr, [r0, #(15 * 4)]     // user pc -> LR_svc
+    ldmia   r0, {{r0-r12}}            // user r0-r12
+    movs    pc, lr                  // enter USR mode (CPSR <- SPSR)
+
+// ---- Set up the banked stack pointers for the exception modes --------------
+// Called once per CPU from `trap::init_on_cpu` (in SVC mode). The scratch
+// stacks are used only briefly in each vector prologue before switching to SVC.
+// TODO: per-CPU stacks for SMP.
+.global arm_setup_exception_stacks
+.type arm_setup_exception_stacks, %function
+arm_setup_exception_stacks:
+    mrs     r0, cpsr
+    cpsid   i, #0x12                // IRQ mode
+    ldr     sp, =irq_mode_stack_top
+    cpsid   i, #0x17                // ABT mode
+    ldr     sp, =abt_mode_stack_top
+    cpsid   i, #0x1b                // UND mode
+    ldr     sp, =und_mode_stack_top
+    msr     cpsr_c, r0              // restore the original (SVC) mode
+    bx      lr
+
+// ---- Per-mode scratch stacks and the user-entry globals --------------------
+.section .bss
+.balign 8
+irq_mode_stack:
+    .zero 4096
+irq_mode_stack_top:
+abt_mode_stack:
+    .zero 4096
+abt_mode_stack_top:
+und_mode_stack:
+    .zero 4096
+und_mode_stack_top:
+
+.global RUN_USER_KERNEL_SP
+RUN_USER_KERNEL_SP:
+    .zero 4
+.global RUN_USER_CTX_PTR
+RUN_USER_CTX_PTR:
+    .zero 4

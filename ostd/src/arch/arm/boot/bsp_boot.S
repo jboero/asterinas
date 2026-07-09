@@ -128,6 +128,11 @@ _start:
     ldr     r0, =bsp_boot_virt
     bx      r0
 
+    // Emit the literal pool for the `ldr rN, =...` above here, so it stays
+    // within PC-relative range (the 4 KiB root table below would push an
+    // auto-placed pool out of range).
+    .ltorg
+
 // ---- The LPAE L1 root table, populated at runtime --------------------------
 // Only entries 0-3 are consulted by the hardware (T0SZ = 0), but a full 4 KiB
 // page is reserved so that it can be reused as an Asterinas 512-slot root.

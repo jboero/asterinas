@@ -62,10 +62,15 @@ use crate::{
 };
 
 /// The maximum number of bytes of the metadata of a frame.
-pub const FRAME_METADATA_MAX_SIZE: usize = META_SLOT_SIZE
-    - size_of::<AtomicU64>()
-    - size_of::<FrameMetaVtablePtr>()
-    - size_of::<AtomicU64>();
+///
+/// The non-storage fields are two [`AtomicU64`]s and a [`FrameMetaVtablePtr`]
+/// (one pointer wide). On 64-bit targets these sum to 24 bytes with no padding.
+/// On 32-bit targets the 4-byte vtable pointer is narrower, but the `AtomicU64`
+/// fields force 8-byte alignment, so the slot still reserves 24 bytes for the
+/// header (4 of which become padding); reserving a fixed 24 bytes keeps
+/// `size_of::<MetaSlot>() == META_SLOT_SIZE` on both.
+pub const FRAME_METADATA_MAX_SIZE: usize =
+    META_SLOT_SIZE - size_of::<AtomicU64>() - size_of::<AtomicU64>() - size_of::<AtomicU64>();
 /// The maximum alignment in bytes of the metadata of a frame.
 pub const FRAME_METADATA_MAX_ALIGN: usize = META_SLOT_SIZE;
 

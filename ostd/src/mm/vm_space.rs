@@ -682,7 +682,13 @@ pub(crate) struct UserPtConfig {}
 // `item_ref_from_raw` are correctly implemented with respect to the `Item` and
 // `ItemRef` types.
 unsafe impl PageTableConfig for UserPtConfig {
+    // On 64-bit arches the 512-entry root splits 256/256 (user/kernel). On
+    // ARMv7-A LPAE the root has 4 entries (1 GiB each); user space is the low
+    // 2 GiB, i.e. entries 0 and 1.
+    #[cfg(not(target_arch = "arm"))]
     const TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..256;
+    #[cfg(target_arch = "arm")]
+    const TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..2;
 
     type E = PageTableEntry;
     type C = PagingConsts;

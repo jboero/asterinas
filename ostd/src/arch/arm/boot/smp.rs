@@ -8,8 +8,8 @@ use crate::{boot::smp::PerApRawInfo, mm::Paddr};
 
 global_asm!(include_str!("ap_boot.S"));
 
-/// PSCI `CPU_ON` (SMC64) function identifier.
-const PSCI_CPU_ON: u64 = 0xC400_0003;
+/// PSCI `CPU_ON` (SMC32/HVC32) function identifier.
+const PSCI_CPU_ON: u32 = 0x8400_0003;
 
 /// Returns the number of processors described by the device tree.
 pub(crate) fn count_processors() -> Option<u32> {
@@ -86,20 +86,22 @@ fn ap_boot_start_paddr() -> Paddr {
 ///
 /// The caller must ensure the arguments describe a valid, not-yet-started CPU.
 unsafe fn psci_cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> i64 {
-    let ret: i64;
+    let ret: u32;
     // SAFETY: PSCI calls have no memory-safety implications; the conduit is HVC
-    // (the QEMU `virt` default when EL2 is present).
+    // (the QEMU `virt` default when EL2 is present). The 32-bit calling
+    // convention passes arguments in r0-r3.
     unsafe {
         core::arch::asm!(
+            ".arch_extension virt",
             "hvc #0",
-            inout("x0") PSCI_CPU_ON => ret,
-            in("x1") target_cpu,
-            in("x2") entry_point,
-            in("x3") context_id,
+            inout("r0") PSCI_CPU_ON => ret,
+            in("r1") target_cpu as u32,
+            in("r2") entry_point as u32,
+            in("r3") context_id as u32,
             options(nostack),
         );
     }
-    ret
+    ret as i32 as i64
 }
 
 /// # Safety
@@ -124,10 +126,16 @@ unsafe fn fill_boot_page_table_ptr(pt_ptr: Paddr) {
     unsafe { __ap_boot_page_table_pointer = pt_ptr };
 }
 
-/// Returns the GIC CPU-interface number (`MPIDR_EL1.Aff0`) of the current CPU.
+/// Returns the GIC CPU-interface number (`MPIDR.Aff0`) of the current CPU.
 pub(in crate::arch) fn get_current_hart_id() -> u32 {
-    let mpidr: u64;
-    // SAFETY: Reading `MPIDR_EL1` has no side effects.
-    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nostack, nomem)) };
-    (mpidr & 0xff) as u32
+    let mpidr: u32;
+    // `MPIDR` is CP15 c0, opc2 5. SAFETY: Reading `MPIDR` has no side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrc p15, 0, {}, c0, c0, 5",
+            out(reg) mpidr,
+            options(nostack, nomem),
+        )
+    };
+    mpidr & 0xff
 }

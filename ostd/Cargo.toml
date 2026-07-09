@@ -74,6 +74,11 @@ fdt = { version = "0.1.5", features = ["pretty-printing"] }
 fdt = { version = "0.1.5", features = ["pretty-printing"] }
 unwinding = { version = "=0.2.8", default-features = false, features = ["fde-static", "hide-trace", "panic", "personality", "unwinder"] }
 
+[target.armv7a-none-eabi.dependencies]
+fdt = { version = "0.1.5", features = ["pretty-printing"] }
+# NOTE: the `unwinding` crate does not support 32-bit ARM, so (like LoongArch)
+# the ARM port uses the non-unwinding panic/backtrace fallback in `panic.rs`.
+
 [features]
 default = ["cvm_guest"]
 # The guest OS support for Confidential VMs (CVMs), e.g., Intel TDX

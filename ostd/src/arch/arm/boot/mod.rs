@@ -195,7 +195,7 @@ fn read_dtb_addr(value: &[u8]) -> Option<usize> {
 ///   address in the first argument register.
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn aarch64_boot(device_tree_paddr: usize) -> ! {
+unsafe extern "C" fn arm_boot(device_tree_paddr: usize) -> ! {
     // Install the exception vectors early so that any fault during boot (e.g.
     // while building or activating the kernel page table) is reported as a
     // panic rather than hanging on the firmware's default vector.

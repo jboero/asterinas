@@ -23,7 +23,7 @@ use core::{
     fmt::Debug,
     marker::PhantomData,
     ops::{Bound, Range, RangeFrom, RangeFull, RangeTo, RangeToInclusive},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::Ordering,
 };
 
 use bitvec::{order::Lsb0, view::BitView};
@@ -129,7 +129,13 @@ pub struct IdSet<I> {
     phantom: PhantomData<I>,
 }
 
+// The backing integer for the bit set. `bitvec`'s `BitStore` is only
+// implemented for integers up to the target's pointer width, so 32-bit targets
+// must use `u32` rather than `u64`.
+#[cfg(target_pointer_width = "64")]
 type InnerPart = u64;
+#[cfg(target_pointer_width = "32")]
+type InnerPart = u32;
 
 const BITS_PER_PART: usize = InnerPart::BITS as usize;
 const NR_PARTS_NO_ALLOC: usize = 2;
@@ -353,13 +359,16 @@ pub struct AtomicIdSet<I> {
     phantom: PhantomData<I>,
 }
 
-type AtomicInnerPart = AtomicU64;
+#[cfg(target_pointer_width = "64")]
+use core::sync::atomic::AtomicU64 as AtomicInnerPart;
+#[cfg(target_pointer_width = "32")]
+use core::sync::atomic::AtomicU32 as AtomicInnerPart;
 const_assert!(size_of::<AtomicInnerPart>() == size_of::<InnerPart>());
 
 impl<I: Id> AtomicIdSet<I> {
     /// Creates a new `AtomicIdSet` from an `IdSet`.
     pub fn new(value: IdSet<I>) -> Self {
-        let bits = value.bits.into_iter().map(AtomicU64::new).collect();
+        let bits = value.bits.into_iter().map(AtomicInnerPart::new).collect();
         Self {
             bits,
             phantom: PhantomData,

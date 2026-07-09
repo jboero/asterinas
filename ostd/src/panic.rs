@@ -75,13 +75,13 @@ impl PanicGuard {
     }
 }
 
-#[cfg(not(target_arch = "loongarch64"))]
+#[cfg(not(any(target_arch = "loongarch64", target_arch = "arm")))]
 pub use unwinding::panic::{begin_panic, catch_unwind};
 
 /// Prints the stack trace of the current thread to the console.
 ///
 /// The printing procedure is protected by a spin lock to prevent interleaving.
-#[cfg(not(target_arch = "loongarch64"))]
+#[cfg(not(any(target_arch = "loongarch64", target_arch = "arm")))]
 pub fn print_stack_trace() {
     use core::ffi::c_void;
 
@@ -145,7 +145,7 @@ pub fn print_stack_trace() {
 }
 
 /// Catches unwinding panics.
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(target_arch = "loongarch64", target_arch = "arm"))]
 pub fn catch_unwind<R, F: FnOnce() -> R>(
     f: F,
 ) -> Result<R, alloc::boxed::Box<dyn core::any::Any + Send>> {
@@ -154,13 +154,13 @@ pub fn catch_unwind<R, F: FnOnce() -> R>(
 }
 
 /// Begins panic handling
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(target_arch = "loongarch64", target_arch = "arm"))]
 pub fn begin_panic<R>(_: alloc::boxed::Box<R>) {
     // TODO: Support panic context in LoongArch.
 }
 
 /// Prints the stack trace of the current thread to the console.
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(target_arch = "loongarch64", target_arch = "arm"))]
 pub fn print_stack_trace() {
     // TODO: Support stack trace print in LoongArch.
     early_println!("Printing stack trace:");
