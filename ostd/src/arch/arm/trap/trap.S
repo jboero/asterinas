@@ -92,38 +92,42 @@ vec_svc:
     // expected during boot.
     SAVE_USER_AND_RETURN TK_SYSCALL
 
-vec_irq:
-    sub     lr, lr, #4              // IRQ return address = LR - 4
-    // Distinguish user vs kernel by the saved mode in SPSR.
+// Determines whether the exception came from USR mode without destroying the
+// interrupted `r0`: it is saved to this mode's scratch stack across the check
+// and restored afterwards (`ldr` does not affect the condition flags, so the
+// `cmp` result survives). Without this, a kernel trap would clobber `r0` with
+// the saved mode value (0x13 for SVC), corrupting the interrupted context.
+.macro CHECK_FROM_USER
+    str     r0, [sp, #-4]!         // preserve interrupted r0
     mrs     r0, spsr
     and     r0, r0, #0x1f
     cmp     r0, #0x10               // USR mode?
+    ldr     r0, [sp], #4           // restore interrupted r0 (flags preserved)
+.endm
+
+vec_irq:
+    sub     lr, lr, #4              // IRQ return address = LR - 4
+    CHECK_FROM_USER
     bne     kernel_irq_entry
     SAVE_USER_AND_RETURN TK_IRQ
 
 vec_data_abort:
     sub     lr, lr, #8              // data-abort return = LR - 8
-    mrs     r0, spsr
-    and     r0, r0, #0x1f
-    cmp     r0, #0x10
+    CHECK_FROM_USER
     bne     kernel_abort_entry_data
     SAVE_FAULT_INFO 1
     SAVE_USER_AND_RETURN TK_DATA_ABORT
 
 vec_prefetch_abort:
     sub     lr, lr, #4              // prefetch-abort return = LR - 4
-    mrs     r0, spsr
-    and     r0, r0, #0x1f
-    cmp     r0, #0x10
+    CHECK_FROM_USER
     bne     kernel_abort_entry_prefetch
     SAVE_FAULT_INFO 0
     SAVE_USER_AND_RETURN TK_PREFETCH_ABORT
 
 vec_undef:
     sub     lr, lr, #4              // return to the undefined instruction
-    mrs     r0, spsr
-    and     r0, r0, #0x1f
-    cmp     r0, #0x10
+    CHECK_FROM_USER
     bne     .                       // kernel undefined instruction: hang
     SAVE_USER_AND_RETURN TK_UNDEF
 
@@ -229,13 +233,13 @@ arm_setup_exception_stacks:
 .section .bss
 .balign 8
 irq_mode_stack:
-    .zero 4096
+    .zero 0x10000
 irq_mode_stack_top:
 abt_mode_stack:
-    .zero 4096
+    .zero 0x10000
 abt_mode_stack_top:
 und_mode_stack:
-    .zero 4096
+    .zero 0x10000
 und_mode_stack_top:
 
 .global RUN_USER_KERNEL_SP
