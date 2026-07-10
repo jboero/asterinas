@@ -6,9 +6,9 @@
 # The vDSO is a tiny hand-written assembly shared object provided by the kernel
 # to userspace. It contains no C and links no libc. Built once and checked in.
 #
-# NOTE: This proof-of-concept ARM port reuses the asm-generic syscall table, so
-# `__NR_rt_sigreturn` is 139 (the generic number), issued via `svc #0` with the
-# number in `r7`.
+# NOTE: The port speaks the stock ARM EABI syscall ABI, so `__NR_rt_sigreturn`
+# is 173 (the legacy `arch/arm` number), issued via `svc #0` with the number in
+# `r7`.
 set -e
 ASTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ASTER_DIR/kernel/src/vdso_arm.so"
@@ -25,7 +25,7 @@ core::arch::global_asm!(
     ".type __vdso_rt_sigreturn, %function",
     "__vdso_rt_sigreturn:",
     "__kernel_rt_sigreturn:",
-    "    mov r7, #139", // __NR_rt_sigreturn (asm-generic)
+    "    mov r7, #173", // __NR_rt_sigreturn (ARM EABI)
     "    svc #0",
 );
 #[panic_handler]

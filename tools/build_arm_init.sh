@@ -5,8 +5,8 @@
 # into a gzip-compressed `newc` cpio initramfs.
 #
 # The program is `no_std`/`no_main` Rust: it issues raw `write(2)`/`exit(2)`
-# system calls via `svc #0` (Linux asm-generic ABI, syscall number in `r7`).
-# There is no libc and no C anywhere in the image.
+# system calls via `svc #0` (Linux ARM EABI, legacy `arch/arm` numbers in `r7` —
+# the same numbers a stock ARM libc uses). There is no libc and no C in the image.
 #
 # A plain `-Ttext=0x10000` makes rust-lld emit a separate read-only segment for
 # the ELF header that overlaps the executable .text at the same page, which the
@@ -32,10 +32,10 @@ core::arch::global_asm!(
     "    mov  r0, #1",     // fd = stdout
     "    adr  r1, msg",    // buf
     "    mov  r2, #41",    // len (bytes of msg)
-    "    mov  r7, #64",    // __NR_write (asm-generic)
+    "    mov  r7, #4",     // __NR_write (ARM EABI)
     "    svc  #0",
     "    mov  r0, #0",     // status = 0
-    "    mov  r7, #93",    // __NR_exit (asm-generic)
+    "    mov  r7, #1",     // __NR_exit (ARM EABI)
     "    svc  #0",
     "1:  b 1b",
     ".balign 4",

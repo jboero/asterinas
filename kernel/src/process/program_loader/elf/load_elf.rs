@@ -74,7 +74,8 @@ pub fn load_elf_to_vmar(
     #[cfg(any(
         target_arch = "x86_64",
         target_arch = "riscv64",
-        target_arch = "aarch64"
+        target_arch = "aarch64",
+        target_arch = "arm"
     ))]
     if let Some(vdso_text_base) = map_vdso_to_vmar(vmar) {
         #[cfg(any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "arm"))]
@@ -489,7 +490,8 @@ fn init_aux_vec(
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "riscv64",
-    target_arch = "aarch64"
+    target_arch = "aarch64",
+    target_arch = "arm"
 ))]
 fn map_vdso_to_vmar(vmar: &Vmar) -> Option<Vaddr> {
     use crate::vdso::{VDSO_VMO_LAYOUT, vdso_vmo};

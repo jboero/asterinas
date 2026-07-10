@@ -47,7 +47,15 @@ exception_vector_table:
 //   spsr    = user CPSR
 //   the current mode's banked sp is a small scratch stack.
 // On entry `\kind` is the trap_kind to record.
-.macro SAVE_USER_AND_RETURN kind
+// Saves the user context into the active `RawUserContext` and returns through
+// run_user. `fault` selects whether to also record fault status/address:
+// 0 = none, 1 = data abort (DFSR/DFAR), 2 = prefetch abort (IFSR/IFAR).
+//
+// The fault info MUST be recorded here, *after* the user GPRs are saved, using
+// r1/r2 as scratch — those user values are already in the ctx. Reading the CP15
+// fault registers earlier (into r0-r2) would clobber the user's r0/r1/r2 before
+// they are saved, corrupting the interrupted context on every page fault.
+.macro SAVE_USER_AND_RETURN kind, fault=0
     // Free r0 as scratch using this mode's scratch stack.
     str     r0, [sp, #-4]!
     ldr     r0, =RUN_USER_CTX_PTR
@@ -62,27 +70,23 @@ exception_vector_table:
     str     r1, [r0, #0x40]         // ctx->cpsr = user CPSR
     mov     r1, #\kind
     str     r1, [r0, #0x50]         // ctx->trap_kind
+.if \fault == 1
+    mrc     p15, 0, r1, c5, c0, 0   // DFSR
+    mrc     p15, 0, r2, c6, c0, 0   // DFAR
+    str     r1, [r0, #0x48]         // ctx->fsr
+    str     r2, [r0, #0x4C]         // ctx->far
+.elseif \fault == 2
+    mrc     p15, 0, r1, c5, c0, 1   // IFSR
+    mrc     p15, 0, r2, c6, c0, 2   // IFAR
+    str     r1, [r0, #0x48]         // ctx->fsr
+    str     r2, [r0, #0x4C]         // ctx->far
+.endif
     // Return to the kernel: switch to SVC, restore run_user's frame.
     cps     #0x13                   // SVC mode
     ldr     r1, =RUN_USER_KERNEL_SP
     ldr     sp, [r1]
     pop     {{r4-r11, lr}}
     bx      lr
-.endm
-
-// Records the current data/instruction fault status+address into the ctx.
-.macro SAVE_FAULT_INFO is_data
-    ldr     r0, =RUN_USER_CTX_PTR
-    ldr     r0, [r0]
-.if \is_data
-    mrc     p15, 0, r1, c5, c0, 0   // DFSR
-    mrc     p15, 0, r2, c6, c0, 0   // DFAR
-.else
-    mrc     p15, 0, r1, c5, c0, 1   // IFSR
-    mrc     p15, 0, r2, c6, c0, 2   // IFAR
-.endif
-    str     r1, [r0, #0x48]         // ctx->fsr
-    str     r2, [r0, #0x4C]         // ctx->far
 .endm
 
 // ---- Per-exception vectors -------------------------------------------------
@@ -115,15 +119,13 @@ vec_data_abort:
     sub     lr, lr, #8              // data-abort return = LR - 8
     CHECK_FROM_USER
     bne     kernel_abort_entry_data
-    SAVE_FAULT_INFO 1
-    SAVE_USER_AND_RETURN TK_DATA_ABORT
+    SAVE_USER_AND_RETURN TK_DATA_ABORT, 1
 
 vec_prefetch_abort:
     sub     lr, lr, #4              // prefetch-abort return = LR - 4
     CHECK_FROM_USER
     bne     kernel_abort_entry_prefetch
-    SAVE_FAULT_INFO 0
-    SAVE_USER_AND_RETURN TK_PREFETCH_ABORT
+    SAVE_USER_AND_RETURN TK_PREFETCH_ABORT, 2
 
 vec_undef:
     sub     lr, lr, #4              // return to the undefined instruction
@@ -246,7 +248,8 @@ run_user:
     ldr     r1, [r0, #0x40]         // user CPSR
     msr     spsr_cxsf, r1
     ldr     r1, [r0, #0x44]         // user TLS
-    mcr     p15, 0, r1, c13, c0, 2  // TPIDRURW
+    mcr     p15, 0, r1, c13, c0, 2  // TPIDRURW (user read/write scratch)
+    mcr     p15, 0, r1, c13, c0, 3  // TPIDRURO (kernel-set TLS; what libc reads)
 
     add     r1, r0, #(13 * 4)
     ldmia   r1, {{r13, r14}}^         // load user sp, lr into USR-banked regs

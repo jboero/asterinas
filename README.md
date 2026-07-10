@@ -23,6 +23,22 @@ https://github.com/user-attachments/assets/eabf8674-8503-44f7-abcc-52395d2ca4a3
     <br/>
 </p>
 
+> [!WARNING]
+> **This is an experimental, unofficial fork of Asterinas.**
+> It adds proof-of-concept **AArch64 (ARM64)** and **32-bit ARMv7-A** ports that
+> boot the kernel to userspace in QEMU and run real, statically-linked Linux ELF
+> programs (musl libc, TLS, threads, syscalls) — all with **no C in the kernel
+> image** (Rust + hand-written assembly). These ports, and much of this fork's
+> ARM-related code, are **heavily AI-assisted ("vibe-coded")** and are **not
+> production-grade**: they are single-board (QEMU `virt`) proofs of concept, are
+> not validated against upstream's roadmap, and upstream Asterinas is pursuing
+> ARM support on its own, separate track. Treat this fork as exploration and
+> reference material, not as something to depend on.
+>
+> Reproduce the boots with `tools/run_arm_demo.sh` and `tools/run_aarch64_demo.sh`;
+> see `test/arm-boot/` and `test/aarch64-boot/` for the QEMU machine-compatibility
+> matrices. Everything below is the upstream project's own README.
+
 **News:**
 * 2025-12-08: **FAST 2026** accepted a paper on a novel secure storage solution having been integrated into Asterinas: _MlsDisk: Trusted Block Storage for TEEs Based on Layered Secure Logging_.
 * 2025-10-17: **ICSE 2026** accepted yet another paper about Asterinas: _RusyFuzz: Unhandled Exception Guided Fuzzing for Rust OS Kernel_.

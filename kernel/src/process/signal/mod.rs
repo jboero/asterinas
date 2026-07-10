@@ -415,10 +415,16 @@ pub fn handle_user_signal(
             // On AArch64/ARM the FP/SIMD state lives in the reserved area that
             // follows the `mcontext_t` inside the `ucontext_t`; we place the FPU
             // bytes immediately after the `ucontext_t`.
+            //
+            // The `ucontext_t` must be at least 16-byte aligned. The handler's
+            // `sp` is later set to `ucontext_addr.align_down(16)` and that same
+            // `sp` is where `rt_sigreturn` reads the `ucontext_t` back from, so
+            // if the two disagree the whole frame is read at the wrong offset.
+            // On 32-bit ARM `align_of::<ucontext_t>()` is only 8, so force 16.
             let ucontext_addr = alloc_aligned_in_user_stack(
                 stack_pointer,
                 size_of::<ucontext_t>() + fpu_context_bytes.len(),
-                align_of::<ucontext_t>(),
+                align_of::<ucontext_t>().max(16),
             );
             let fpu_context_addr = (ucontext_addr as usize) + size_of::<ucontext_t>();
         } else {

@@ -283,7 +283,7 @@ impl InitStackWriter<'_> {
 
         // Write argc.
         let argc = self.argv.len();
-        self.write_u64(argc as u64)?;
+        self.write_word(argc as u64)?;
 
         // Ensure the stack top is 16-byte aligned.
         debug_assert_eq!(self.pos() & !0xf, self.pos());
@@ -320,23 +320,25 @@ impl InitStackWriter<'_> {
     /// The 16-byte alignment is required by x86-64 System V ABI.
     /// To meet that requirement, this method may write some extra 8-byte `u64`s.
     fn adjust_stack_alignment(&self, envp_pointers: &[u64], argv_pointers: &[u64]) -> Result<()> {
-        // Ensure 8-byte alignment.
-        self.write_u64(0)?;
-        let auxvec_size = (self.auxvec.table().len() + 1) * (size_of::<u64>() * 2);
-        let envp_pointers_size = (envp_pointers.len() + 1) * size_of::<u64>();
-        let argv_pointers_size = (argv_pointers.len() + 1) * size_of::<u64>();
-        let argc_size = size_of::<u64>();
+        // The layout below `AT_RANDOM` uses native words (see `write_word`).
+        let word = size_of::<usize>();
+        let auxvec_size = (self.auxvec.table().len() + 1) * (word * 2);
+        let envp_pointers_size = (envp_pointers.len() + 1) * word;
+        let argv_pointers_size = (argv_pointers.len() + 1) * word;
+        let argc_size = word;
         let to_write_size = auxvec_size + envp_pointers_size + argv_pointers_size + argc_size;
-        if !(self.pos() - to_write_size).is_multiple_of(16) {
-            self.write_u64(0)?;
+        // Pad in native-word units until the eventual stack top will be 16-byte
+        // aligned (a superset of the 8-byte alignment 32-bit ARM requires).
+        while !(self.pos() - to_write_size).is_multiple_of(16) {
+            self.write_word(0)?;
         }
         Ok(())
     }
 
     fn write_aux_vec(&self) -> Result<()> {
-        // Write a NULL auxiliary entry.
-        self.write_u64(0)?;
-        self.write_u64(AuxKey::AT_NULL as u64)?;
+        // Write a NULL auxiliary entry (each field is one native word).
+        self.write_word(0)?;
+        self.write_word(AuxKey::AT_NULL as u64)?;
         // Write the auxiliary vector.
         let aux_vec: Vec<_> = self
             .auxvec
@@ -345,30 +347,30 @@ impl InitStackWriter<'_> {
             .map(|(aux_key, aux_value)| (*aux_key, *aux_value))
             .collect();
         for (aux_key, aux_value) in aux_vec.iter() {
-            self.write_u64(*aux_value)?;
-            self.write_u64(*aux_key as u64)?;
+            self.write_word(*aux_value)?;
+            self.write_word(*aux_key as u64)?;
         }
         Ok(())
     }
 
     fn write_envp_pointers(&self, mut envp_pointers: Vec<u64>) -> Result<()> {
         // Write a NULL pointer.
-        self.write_u64(0)?;
+        self.write_word(0)?;
         // Write envp pointers.
         envp_pointers.reverse();
         for envp_pointer in envp_pointers {
-            self.write_u64(envp_pointer)?;
+            self.write_word(envp_pointer)?;
         }
         Ok(())
     }
 
     fn write_argv_pointers(&self, mut argv_pointers: Vec<u64>) -> Result<()> {
         // Write a NULL pointer.
-        self.write_u64(0)?;
+        self.write_word(0)?;
         // Write argv pointers.
         argv_pointers.reverse();
         for argv_pointer in argv_pointers {
-            self.write_u64(argv_pointer)?;
+            self.write_word(argv_pointer)?;
         }
         Ok(())
     }
@@ -379,6 +381,23 @@ impl InitStackWriter<'_> {
         let new_pos = self.reserve_pos(size_of::<u64>(), align_of::<u64>())?;
         let bytes = val.to_ne_bytes();
         let mut reader = VmReader::from(bytes.as_slice()).to_fallible();
+        self.vmo.write(new_pos - self.map_addr, &mut reader)?;
+        Ok(new_pos as u64)
+    }
+
+    /// Writes one native userspace word (`unsigned long`/pointer) to the stack:
+    /// 8 bytes on 64-bit targets, 4 bytes on 32-bit ones (e.g. ARM). The initial
+    /// process stack — `argc`, the `argv`/`envp` pointer arrays, and each 2-word
+    /// auxiliary-vector entry — is laid out in these native words, so writing
+    /// them as fixed `u64`s corrupts the layout that a 32-bit libc parses.
+    ///
+    /// Only the low `size_of::<usize>()` bytes of `val` are written (all Asterinas
+    /// targets are little-endian); pointers and values on a 32-bit target fit.
+    fn write_word(&self, val: u64) -> Result<u64> {
+        let word = size_of::<usize>();
+        let new_pos = self.reserve_pos(word, word)?;
+        let bytes = val.to_ne_bytes();
+        let mut reader = VmReader::from(&bytes[..word]).to_fallible();
         self.vmo.write(new_pos - self.map_addr, &mut reader)?;
         Ok(new_pos as u64)
     }

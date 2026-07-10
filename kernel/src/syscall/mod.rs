@@ -379,7 +379,26 @@ impl SyscallArgument {
 }
 
 pub fn handle_syscall(ctx: &Context, user_ctx: &mut UserContext) {
-    let syscall_frame = SyscallArgument::new_from_context(user_ctx);
+    #[allow(unused_mut)]
+    let mut syscall_frame = SyscallArgument::new_from_context(user_ctx);
+    #[cfg(target_arch = "arm")]
+    {
+        // The ARM-private range (`__ARM_NR_*`, e.g. set_tls) is handled inline.
+        if let Some(ret) = arch::handle_arm_private_syscall(
+            syscall_frame.syscall_number,
+            syscall_frame.args,
+            user_ctx,
+        ) {
+            user_ctx.set_syscall_ret(ret as usize);
+            return;
+        }
+        // Stock ARM binaries use the legacy `arch/arm` numbering; bridge it to
+        // the unified asm-generic table the shared handlers are written against.
+        let (number, args) =
+            arch::translate_arm_syscall(syscall_frame.syscall_number, syscall_frame.args);
+        syscall_frame.syscall_number = number;
+        syscall_frame.args = args;
+    }
     let syscall_return = arch::syscall_dispatch(
         syscall_frame.syscall_number,
         syscall_frame.args,
