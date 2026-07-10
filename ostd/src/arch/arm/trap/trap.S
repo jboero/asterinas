@@ -160,14 +160,36 @@ vec_undef:
     movs    pc, lr
 .endm
 
+// A kernel-mode IRQ must run the handler (which may reschedule) in normal SVC
+// context on the *interrupted kernel stack*, not in IRQ mode on the tiny IRQ
+// scratch stack: rescheduling via `context_switch` in IRQ mode would save the
+// IRQ sp as the task's sp, and a nested IRQ would clobber the IRQ-banked return
+// registers. `srs` saves the return PC/CPSR; then we switch to SVC and build
+// a full TrapFrame below the srs record (the interrupted SVC sp/lr are the
+// current banked values, since IRQ mode never touched them).
 kernel_irq_entry:
-    BUILD_KERNEL_FRAME
+    srsdb   sp!, #0x13              // IRQ -> SVC stack: push lr(PC) and spsr(CPSR)
+    cps     #0x13                   // switch to SVC mode (interrupted kernel stack)
+    sub     sp, sp, #(19 * 4)       // reserve a TrapFrame below the srs record
+    stmia   sp, {{r0-r12}}          // r0-r12 (r0 preserved by CHECK_FROM_USER)
+    add     r0, sp, #(19 * 4 + 8)   // interrupted SVC sp (frame + srs record)
+    str     r0, [sp, #(13 * 4)]     // r13
+    str     lr, [sp, #(14 * 4)]     // r14 (SVC-banked, untouched by IRQ mode)
+    ldr     r0, [sp, #(19 * 4)]     // PC from the srs record
+    str     r0, [sp, #(15 * 4)]
+    ldr     r0, [sp, #(19 * 4 + 4)] // CPSR from the srs record
+    str     r0, [sp, #(16 * 4)]
     mov     r0, #0
     str     r0, [sp, #(17 * 4)]     // fsr = 0
     str     r0, [sp, #(18 * 4)]     // far = 0
     mov     r0, sp
     bl      irq_handler
-    RET_KERNEL_FRAME
+    // Restore the interrupted r14 (SVC lr), which `bl` clobbered; rfe restores
+    // PC/CPSR and the stack unwinding restores r13. r0-r12 come from the frame.
+    ldr     lr, [sp, #(14 * 4)]
+    ldmia   sp, {{r0-r12}}          // restore r0-r12
+    add     sp, sp, #(19 * 4)       // pop the TrapFrame -> sp at srs record
+    rfeia   sp!                     // return: load PC/CPSR and resume
 
 kernel_abort_entry_data:
     BUILD_KERNEL_FRAME
