@@ -631,7 +631,7 @@ impl Mount {
     ///
     /// In some cases we may need to reset the parent of
     /// the created Mount, such as move mount.
-    fn set_parent(&self, mount: Option<&Arc<Mount>>) {
+    pub(super) fn set_parent(&self, mount: Option<&Arc<Mount>>) {
         let mut parent = self.parent.write();
         *parent = mount.map(Arc::downgrade);
     }

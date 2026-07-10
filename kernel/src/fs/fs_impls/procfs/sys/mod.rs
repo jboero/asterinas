@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use self::{fs::FsDirOps, kernel::KernelDirOps};
+use self::{fs::FsDirOps, kernel::KernelDirOps, net::NetDirOps};
 use super::{
     StaticEntry,
     template::{ReaddirEntry, listed_entries_from_table, visit_listed_entries},
@@ -19,6 +19,7 @@ use crate::{
 
 mod fs;
 mod kernel;
+mod net;
 mod vm;
 
 /// Represents the inode at `/proc/sys`.
@@ -35,6 +36,7 @@ impl SysDirOps {
     const STATIC_ENTRIES: &'static [StaticEntry] = &[
         ("fs", InodeType::Dir, FsDirOps::new_inode),
         ("kernel", InodeType::Dir, KernelDirOps::new_inode),
+        ("net", InodeType::Dir, NetDirOps::new_inode),
         ("vm", InodeType::Dir, VmDirOps::new_inode),
     ];
 }

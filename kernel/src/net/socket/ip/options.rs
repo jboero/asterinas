@@ -21,6 +21,10 @@ pub(super) struct IpOptionSet {
     ttl: IpTtl,
     hdrincl: bool,
     recverr: bool,
+    // IPV6_V6ONLY. Asterinas's network stack is IPv4-only, so this is recorded
+    // but has no effect; it exists so dual-stack-aware callers (e.g. the Go
+    // runtime, which sets it on every AF_INET6 socket) do not fail.
+    v6only: bool,
 }
 
 const DEFAULT_TTL: u8 = 64;
@@ -33,6 +37,7 @@ impl IpOptionSet {
             ttl: IpTtl(None),
             hdrincl: false,
             recverr: false,
+            v6only: false,
         }
     }
 
@@ -42,6 +47,7 @@ impl IpOptionSet {
             ttl: IpTtl(None),
             hdrincl: false,
             recverr: false,
+            v6only: false,
         }
     }
 
@@ -62,6 +68,10 @@ impl IpOptionSet {
             ip_recverr @ Recverr => {
                 let recverr = self.recverr();
                 ip_recverr.set(recverr);
+            }
+            ip_v6only @ Ipv6Only => {
+                let v6only = self.v6only();
+                ip_v6only.set(v6only);
             }
             _ => return_errno_with_message!(Errno::ENOPROTOOPT, "the socket option is unknown"),
         });
@@ -95,6 +105,11 @@ impl IpOptionSet {
                 let recverr = ip_recverr.get().unwrap();
                 self.set_recverr(*recverr);
             }
+            ip_v6only @ Ipv6Only => {
+                // Recorded only; Asterinas has no IPv6 stack so it has no effect.
+                let v6only = ip_v6only.get().unwrap();
+                self.set_v6only(*v6only);
+            }
             _ => return_errno_with_message!(
                 Errno::ENOPROTOOPT,
                 "the socket option to be set is unknown"
@@ -110,6 +125,7 @@ impl_socket_options!(
     pub struct Ttl(IpTtl);
     pub struct Hdrincl(bool);
     pub struct Recverr(bool);
+    pub struct Ipv6Only(bool);
 );
 
 #[derive(Clone, Copy, Debug)]

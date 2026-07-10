@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod common;
+mod icmp;
 mod tcp_conn;
 mod tcp_listen;
 mod udp;
 
 pub use common::NeedIfacePoll;
+pub use icmp::IcmpSocket;
+pub(crate) use icmp::IcmpSocketBg;
 pub use tcp_conn::{ConnectState, RawTcpSocketExt, TcpConnection};
 pub(crate) use tcp_conn::{TcpConnectionBg, TcpProcessResult};
 pub use tcp_listen::TcpListener;

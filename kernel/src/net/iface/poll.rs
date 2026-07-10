@@ -18,6 +18,15 @@ pub fn init_in_first_kthread() {
     }
 }
 
+/// Starts driving `iface` with its own background polling thread.
+///
+/// Used when a new network namespace creates its own loopback interface after
+/// boot, so that namespace's loopback traffic is serviced just like the initial
+/// namespace's interfaces.
+pub(in crate::net) fn spawn_poll_thread(iface: Arc<Iface>) {
+    spawn_background_poll_thread(iface);
+}
+
 pub(super) fn poll_ifaces() {
     for iface in iter_all_ifaces() {
         iface.poll();

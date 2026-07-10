@@ -107,6 +107,12 @@ impl Path {
         &self.mount
     }
 
+    /// Returns the per-mount security flags (nosuid/nodev/noexec/...) of the
+    /// mount this path belongs to.
+    pub fn mount_flags(&self) -> PerMountFlags {
+        self.mount.flags()
+    }
+
     /// Gets the dentry of current `Path`.
     pub(in crate::fs) fn dentry(&self) -> &Arc<Dentry> {
         &self.dentry
@@ -149,6 +155,16 @@ impl Path {
                 Errno::ENOTDIR,
                 "O_DIRECTORY is specified but the file is not a directory"
             );
+        }
+
+        // Mount security: a `nodev` mount disallows accessing device special
+        // files, so a device node smuggled into a container volume cannot be
+        // opened for I/O. O_PATH only takes a reference, so it is unaffected.
+        if inode_type.is_device()
+            && self.mount.flags().contains(PerMountFlags::NODEV)
+            && !status_flags.contains(StatusFlags::O_PATH)
+        {
+            return_errno_with_message!(Errno::EACCES, "device access denied: nodev mount");
         }
 
         if inode_type.is_regular_file()

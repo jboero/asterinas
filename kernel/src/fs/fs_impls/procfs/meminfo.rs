@@ -49,6 +49,15 @@ impl ProcFileOps for MemInfoFileOps {
         writeln!(printer, "MemTotal:\t{} kB", total)?;
         writeln!(printer, "MemFree:\t{} kB", available)?;
         writeln!(printer, "MemAvailable:\t{} kB", available)?;
+        // Asterinas has no buffer/page cache eviction accounting and no swap.
+        // These zero-valued fields are reported because tools such as cAdvisor
+        // (used by the kubelet) require them — e.g. its node memory/swap probe
+        // matches `SwapTotal:\s*([0-9]+) kB` against /proc/meminfo and fails the
+        // whole machine-info collection if the field is absent.
+        writeln!(printer, "Buffers:\t0 kB")?;
+        writeln!(printer, "Cached:\t0 kB")?;
+        writeln!(printer, "SwapTotal:\t0 kB")?;
+        writeln!(printer, "SwapFree:\t0 kB")?;
 
         Ok(printer.bytes_written())
     }

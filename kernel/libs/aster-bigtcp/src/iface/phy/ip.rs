@@ -50,7 +50,8 @@ impl<D: WithDevice, E: Ext> IpIface<D, E> {
             interface
         });
 
-        let common = IfaceCommon::new(name, type_, flags, interface, sched_poll);
+        // IP-medium interface (loopback, veth, bridge): no L2 MAC.
+        let common = IfaceCommon::new(name, type_, flags, None, interface, sched_poll);
 
         Arc::new(Self { driver, common })
     }

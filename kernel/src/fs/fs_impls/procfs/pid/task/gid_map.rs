@@ -2,7 +2,7 @@
 
 use aster_util::printer::VmPrinter;
 
-use super::TidDirOps;
+use super::{TidDirOps, uid_map::write_id_map};
 use crate::{
     fs::{
         file::mkmod,
@@ -10,7 +10,7 @@ use crate::{
         vfs::inode::Inode,
     },
     prelude::*,
-    process::Gid,
+    process::IdMapKind,
     thread::Thread,
 };
 
@@ -31,18 +31,15 @@ impl ProcFileOps for GidMapFileOps {
 
     fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
         let mut printer = VmPrinter::new_skip(writer, offset);
-
-        // This is the default GID map for the initial user namespace.
-        // TODO: Retrieve the GID map from the user namespace of the current process
-        // instead of returning this hard-coded value.
-        writeln!(
-            printer,
-            "{:>10} {:>10} {:>10}",
-            0,
-            0,
-            u32::from(Gid::INVALID)
-        )?;
-
+        let map = match self.0.process() {
+            Some(process) => process.user_ns().lock().format_gid_map(),
+            None => String::new(),
+        };
+        write!(printer, "{}", map)?;
         Ok(printer.bytes_written())
+    }
+
+    fn write_at(&self, _offset: usize, reader: &mut VmReader) -> Result<usize> {
+        write_id_map(&self.0, IdMapKind::Gid, reader)
     }
 }

@@ -90,7 +90,14 @@ impl<E: Ext> TcpListener<E> {
 
             option.apply(&mut socket);
 
-            if let Err(err) = socket.listen(local_endpoint) {
+            // A wildcard (unspecified-address) bind must listen with
+            // `addr: None`: smoltcp's `From<IpEndpoint>` conversion would pin
+            // the socket to `0.0.0.0` and reject every real destination.
+            let listen_endpoint = smoltcp::wire::IpListenEndpoint {
+                addr: (!local_endpoint.addr.is_unspecified()).then_some(local_endpoint.addr),
+                port: local_endpoint.port,
+            };
+            if let Err(err) = socket.listen(listen_endpoint) {
                 return Err((bound, err.into()));
             }
 

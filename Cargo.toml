@@ -232,6 +232,7 @@ smoltcp = { git = "https://github.com/asterinas/smoltcp", tag = "r_2024-11-08_f0
     "proto-ipv6",
     "socket-udp",
     "socket-tcp",
+    "socket-icmp",
 ] }
 takeable = "0.2.2"
 time = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -246,6 +247,7 @@ libflate = { version = "2.3.0", default-features = false }
 log = "0.4"
 no_std_io2 = { version = "0.9.3", default-features = false, features = ["alloc", "nightly"] }
 rand = { version = "0.9.2", default-features = false }
+ruzstd = { version = "0.8.3", default-features = false }
 spin = "0.9.4"
 x86_64 = "0.14.13"
 xmas-elf = "0.10.0"

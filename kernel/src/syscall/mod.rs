@@ -31,6 +31,7 @@ mod alarm;
 #[cfg(target_arch = "x86_64")]
 mod arch_prctl;
 mod bind;
+mod bpf;
 mod brk;
 mod capget;
 mod capset;
@@ -141,6 +142,7 @@ mod sched_setattr;
 mod sched_setparam;
 mod sched_setscheduler;
 mod sched_yield;
+mod seccomp;
 mod select;
 mod semctl;
 mod semget;
@@ -381,6 +383,18 @@ impl SyscallArgument {
 pub fn handle_syscall(ctx: &Context, user_ctx: &mut UserContext) {
     #[allow(unused_mut)]
     let mut syscall_frame = SyscallArgument::new_from_context(user_ctx);
+
+    // Seccomp enforcement: if the calling thread installed a filter, evaluate it
+    // before the syscall runs. The no-filter fast path is one relaxed atomic
+    // load, so threads without seccomp (the entire zero-C node image) are
+    // unaffected. Seccomp filters match on the architecture-native syscall
+    // number, so this runs before the ARM number translation below.
+    if ctx.posix_thread.seccomp().is_active()
+        && seccomp_intercept(ctx, user_ctx, &syscall_frame)
+    {
+        return;
+    }
+
     #[cfg(target_arch = "arm")]
     {
         // The ARM-private range (`__ARM_NR_*`, e.g. set_tls) is handled inline.
@@ -416,6 +430,54 @@ pub fn handle_syscall(ctx: &Context, user_ctx: &mut UserContext) {
             debug!("syscall return error: {:?}", err);
             let errno = err.error() as i32;
             user_ctx.set_syscall_ret((-errno) as usize)
+        }
+    }
+}
+
+/// Evaluates the calling thread's seccomp policy for an attempted syscall.
+/// Returns `true` if the syscall was intercepted (denied/killed) and must NOT be
+/// dispatched; `false` if it is allowed to proceed.
+fn seccomp_intercept(
+    ctx: &Context,
+    user_ctx: &mut UserContext,
+    frame: &SyscallArgument,
+) -> bool {
+    use crate::{
+        process::signal::{
+            constants::{SIGKILL, SIGSYS},
+            signals::kernel::KernelSignal,
+        },
+        seccomp::SeccompAction,
+    };
+
+    // The instruction pointer is not consulted by libseccomp-generated filters,
+    // so pass 0 rather than threading the arch-specific accessor through here.
+    let action = ctx.posix_thread.seccomp().evaluate(
+        frame.syscall_number as i32,
+        frame.args,
+        0,
+    );
+    match action {
+        SeccompAction::Allow => false,
+        SeccompAction::Errno(errno) => {
+            user_ctx.set_syscall_ret((-(errno as i32)) as usize);
+            true
+        }
+        SeccompAction::Trap(_) => {
+            ctx.posix_thread
+                .enqueue_signal(Box::new(KernelSignal::new(SIGSYS)));
+            user_ctx.set_syscall_ret((-(Errno::ENOSYS as i32)) as usize);
+            true
+        }
+        SeccompAction::KillThread => {
+            ctx.posix_thread
+                .enqueue_signal(Box::new(KernelSignal::new(SIGKILL)));
+            true
+        }
+        SeccompAction::KillProcess => {
+            ctx.process
+                .enqueue_signal(Box::new(KernelSignal::new(SIGKILL)));
+            true
         }
     }
 }

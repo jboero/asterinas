@@ -7,11 +7,11 @@ use smoltcp::{
         Context,
         packet::{IpPayload, Packet, icmp_reply_payload_len},
     },
-    phy::{ChecksumCapabilities, Device, RxToken, TxToken},
+    phy::{ChecksumCapabilities, Device, Medium, RxToken, TxToken},
     wire::{
-        IPV4_HEADER_LEN, IPV4_MIN_MTU, Icmpv4DstUnreachable, Icmpv4Repr, IpAddress, IpProtocol,
-        IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr, TcpControl, TcpPacket,
-        TcpRepr, UdpPacket, UdpRepr,
+        IPV4_HEADER_LEN, IPV4_MIN_MTU, IcmpRepr, Icmpv4DstUnreachable, Icmpv4Packet, Icmpv4Repr,
+        IpAddress, IpProtocol, IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr,
+        TcpControl, TcpPacket, TcpRepr, UdpPacket, UdpRepr,
     },
 };
 
@@ -72,8 +72,29 @@ impl<E: Ext> PollContext<'_, E> {
             >,
         Q: FnMut(&Packet, &mut Context, D::TxToken<'_>),
     {
+        // astrokube: only the Ethernet uplink (eth0) carries node-originated
+        // Service traffic that needs reverse-NAT; pod bridges (Medium::Ip) handle
+        // their own NAT in the bridge hub.
+        let nat_ethernet = device.capabilities().medium == Medium::Ethernet;
         while let Some((rx_token, tx_token)) = device.receive(self.iface.context().now()) {
             rx_token.consume(|data| {
+                // astrokube: reverse-NAT a reply to a node-originated ClusterIP
+                // flow before the stack parses it, so the socket (bound to the
+                // VIP) accepts it. RxToken data is read-only, so we NAT a copy;
+                // when nothing matches, apply() leaves it untouched and we fall
+                // through to the original buffer with no extra work beyond a copy.
+                const ETHER_HEADER_LEN: usize = 14;
+                let mut nat_buf;
+                let data: &[u8] = if nat_ethernet
+                    && data.len() > ETHER_HEADER_LEN
+                    && crate::nat::nat_table().is_active()
+                {
+                    nat_buf = data.to_vec();
+                    crate::nat::nat_table().apply(&mut nat_buf[ETHER_HEADER_LEN..]);
+                    &nat_buf
+                } else {
+                    data
+                };
                 let Some((ip_packet, tx_token)) =
                     process_phy(data, self.iface.context_mut(), tx_token)
                 else {
@@ -112,6 +133,9 @@ impl<E: Ext> PollContext<'_, E> {
             }
             IpProtocol::Udp => {
                 self.parse_and_process_udp(&IpRepr::Ipv4(repr), pkt.payload(), &checksum_caps)
+            }
+            IpProtocol::Icmp => {
+                self.parse_and_process_icmp(&IpRepr::Ipv4(repr), pkt.payload(), &checksum_caps)
             }
             _ => None,
         }
@@ -247,7 +271,20 @@ impl<E: Ext> PollContext<'_, E> {
         // Process packets that request to create new connections second.
         if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
             let listener_key = ListenerKey::new(ip_repr.dst_addr(), tcp_repr.dst_port);
-            if let Some(listener) = self.sockets.lookup_listener(&listener_key) {
+            // Fall back to a wildcard listener (bound to the unspecified
+            // address) if no listener matches the exact destination address.
+            let wildcard_key = {
+                let unspecified = match ip_repr.dst_addr() {
+                    IpAddress::Ipv4(_) => IpAddress::Ipv4(core::net::Ipv4Addr::UNSPECIFIED),
+                    IpAddress::Ipv6(_) => IpAddress::Ipv6(core::net::Ipv6Addr::UNSPECIFIED),
+                };
+                ListenerKey::new(unspecified, tcp_repr.dst_port)
+            };
+            if let Some(listener) = self
+                .sockets
+                .lookup_listener(&listener_key)
+                .or_else(|| self.sockets.lookup_listener(&wildcard_key))
+            {
                 let (processed, new_tcp_conn) =
                     listener.process(&mut self.iface, ip_repr, tcp_repr);
 
@@ -316,6 +353,56 @@ impl<E: Ext> PollContext<'_, E> {
         }
 
         processed
+    }
+
+    /// Processes an incoming ICMPv4 message: offers it to ICMP sockets (echo
+    /// replies are matched by identifier) and answers echo requests, which
+    /// makes every interface address pingable.
+    fn parse_and_process_icmp<'pkt>(
+        &mut self,
+        ip_repr: &IpRepr,
+        ip_payload: &'pkt [u8],
+        checksum_caps: &ChecksumCapabilities,
+    ) -> Option<Packet<'pkt>> {
+        let IpRepr::Ipv4(ipv4_repr) = ip_repr else {
+            // TODO: Handle ICMPv6 (echo and neighbor discovery on IP media).
+            return None;
+        };
+
+        let icmp_pkt = Icmpv4Packet::new_checked(ip_payload).ok()?;
+        let icmp_repr = Icmpv4Repr::parse(&icmp_pkt, checksum_caps).ok()?;
+
+        for socket in self.sockets.icmp_socket_iter() {
+            if socket.process(self.iface.context_mut(), ipv4_repr, &icmp_repr) {
+                break;
+            }
+        }
+
+        // Reply to echo requests regardless of sockets, as Linux does.
+        if let Icmpv4Repr::EchoRequest {
+            ident,
+            seq_no,
+            data,
+        } = icmp_repr
+        {
+            let reply = Icmpv4Repr::EchoReply {
+                ident,
+                seq_no,
+                data,
+            };
+            return Some(Packet::new_ipv4(
+                Ipv4Repr {
+                    src_addr: ipv4_repr.dst_addr,
+                    dst_addr: ipv4_repr.src_addr,
+                    next_header: IpProtocol::Icmp,
+                    payload_len: reply.buffer_len(),
+                    hop_limit: 64,
+                },
+                IpPayload::Icmpv4(reply),
+            ));
+        }
+
+        None
     }
 
     fn generate_icmp_unreachable<'pkt>(
@@ -409,9 +496,106 @@ impl<E: Ext> PollContext<'_, E> {
             return did_something_tcp;
         };
 
-        let (did_something_udp, _tx_token) = self.dispatch_udp(tx_token, dispatch_phy);
+        let (did_something_udp, tx_token) = self.dispatch_udp(tx_token, dispatch_phy);
 
-        did_something_tcp || did_something_udp
+        let Some(tx_token) = tx_token else {
+            return did_something_tcp || did_something_udp;
+        };
+
+        let (did_something_icmp, _tx_token) = self.dispatch_icmp(tx_token, dispatch_phy);
+
+        did_something_tcp || did_something_udp || did_something_icmp
+    }
+
+    fn dispatch_icmp<T, Q>(&mut self, tx_token: T, dispatch_phy: &mut Q) -> (bool, Option<T>)
+    where
+        T: TxToken,
+        Q: FnMut(&Packet, &mut Context, T),
+    {
+        let mut tx_token = Some(tx_token);
+        let mut did_something = false;
+
+        let mut actions = Vec::new();
+
+        for socket in self.sockets.icmp_socket_iter() {
+            if !socket.need_dispatch() {
+                continue;
+            }
+
+            did_something = true;
+
+            let mut deferred = None;
+
+            let (cx, pending) = self.iface.inner_mut();
+            socket.dispatch(cx, |cx, ip_repr, icmp_repr| {
+                let IcmpRepr::Ipv4(icmpv4_repr) = icmp_repr else {
+                    return;
+                };
+                let iface = PollableIfaceMut::new(cx, pending);
+                let mut this = PollContext::new(iface, self.sockets, &mut actions);
+
+                if !this.is_unicast_local(ip_repr.dst_addr()) {
+                    dispatch_phy(
+                        &Packet::new(ip_repr.clone(), IpPayload::Icmpv4(*icmpv4_repr)),
+                        this.iface.context_mut(),
+                        tx_token.take().unwrap(),
+                    );
+                    return;
+                }
+
+                // The destination is local (e.g. a ping to loopback or to the
+                // interface's own address). We cannot process it now because it
+                // may cause deadlocks; copy the packet and process it after
+                // releasing the socket lock.
+                deferred = Some((ip_repr.clone(), {
+                    let mut data = vec![0; icmpv4_repr.buffer_len()];
+                    icmpv4_repr.emit(
+                        &mut Icmpv4Packet::new_unchecked(&mut data),
+                        &ChecksumCapabilities::default(),
+                    );
+                    data
+                }));
+            });
+
+            if let Some((ip_repr, ip_payload)) = deferred {
+                // Process the local packet, then keep any generated replies
+                // local too while they are addressed to us (a self-ping's echo
+                // reply must come straight back to the socket; emitting it to
+                // the device would send it to the wire or strand it in the
+                // loopback queue with no poll scheduled).
+                let mut current = Some((ip_repr, ip_payload));
+                for _ in 0..4 {
+                    let Some((pkt_repr, pkt_bytes)) = current.take() else {
+                        break;
+                    };
+                    let Some(reply) = self.parse_and_process_icmp(
+                        &pkt_repr,
+                        &pkt_bytes,
+                        &ChecksumCapabilities::ignored(),
+                    ) else {
+                        break;
+                    };
+
+                    let reply_repr = reply.ip_repr();
+                    if !self.is_unicast_local(reply_repr.dst_addr()) {
+                        dispatch_phy(&reply, self.iface.context_mut(), tx_token.take().unwrap());
+                        break;
+                    }
+
+                    let mut bytes = vec![0; reply_repr.payload_len()];
+                    reply.emit_payload(&reply_repr, &mut bytes, &self.iface.context().caps);
+                    current = Some((reply_repr, bytes));
+                }
+            }
+
+            if tx_token.is_none() {
+                break;
+            }
+        }
+
+        debug_assert!(actions.is_empty());
+
+        (did_something, tx_token)
     }
 
     fn dispatch_tcp<T, Q>(&mut self, tx_token: T, dispatch_phy: &mut Q) -> (bool, Option<T>)

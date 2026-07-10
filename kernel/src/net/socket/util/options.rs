@@ -116,7 +116,7 @@ impl SocketOptionSet {
                 socket_reuse_addr.set(reuse_addr);
             }
             socket_type @ SocketType => {
-                socket_type.set(socket.socket_type());
+                socket_type.set(socket.socket_type() as i32);
             }
             socket_broadcast @ Broadcast => {
                 let broadcast = self.broadcast();

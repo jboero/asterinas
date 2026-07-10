@@ -16,7 +16,8 @@ use crate::{
     net::socket::{
         Socket,
         options::{
-            Error as SocketError, PeerCred, PeerGroups, SocketOption, macros::sock_option_mut,
+            Error as SocketError, PeerCred, PeerGroups, SocketOption, SocketType,
+            macros::sock_option_mut,
         },
         private::SocketPrivate,
         unix::{CUserCred, UnixSocketAddr, cred::SocketCred, ctrl_msg::AuxiliaryData},
@@ -427,6 +428,15 @@ impl Socket for UnixStreamSocket {
             socket_errors @ SocketError => {
                 // TODO: Support socket errors for UNIX sockets
                 socket_errors.set(None);
+                return Ok(());
+            }
+            socket_type @ SocketType => {
+                let ty = if self.is_seqpacket() {
+                    SockType::SOCK_SEQPACKET
+                } else {
+                    SockType::SOCK_STREAM
+                };
+                socket_type.set(ty as i32);
                 return Ok(());
             }
             _ => (),

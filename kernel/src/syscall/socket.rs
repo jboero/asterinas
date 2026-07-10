@@ -4,9 +4,10 @@ use super::SyscallReturn;
 use crate::{
     fs::file::{FileLike, file_table::FdFlags},
     net::socket::{
-        ip::{DatagramSocket, IpAddressFamily, StreamSocket},
+        ip::{DatagramSocket, IcmpSocket, IpAddressFamily, StreamSocket},
         netlink::{
-            NetlinkRouteSocket, NetlinkUeventSocket, StandardNetlinkProtocol, is_valid_protocol,
+            NetlinkNetfilterSocket, NetlinkRouteSocket, NetlinkUeventSocket,
+            StandardNetlinkProtocol, is_valid_protocol,
         },
         unix::{UnixDatagramSocket, UnixStreamSocket},
         vsock::VsockStreamSocket,
@@ -57,6 +58,19 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32, ctx: &Context) -> Resu
                 Protocol::IPPROTO_IP | Protocol::IPPROTO_UDP => {
                     DatagramSocket::new(is_nonblocking) as Arc<dyn FileLike>
                 }
+                Protocol::IPPROTO_ICMP => {
+                    IcmpSocket::new(is_nonblocking, false) as Arc<dyn FileLike>
+                }
+                _ => return_errno_with_message!(Errno::EAFNOSUPPORT, "unsupported protocol"),
+            }
+        }
+        (CSocketAddrFamily::AF_INET, SockType::SOCK_RAW) => {
+            let protocol = Protocol::try_from(protocol)?;
+            debug!("protocol = {:?}", protocol);
+            match protocol {
+                Protocol::IPPROTO_ICMP => {
+                    IcmpSocket::new(is_nonblocking, true) as Arc<dyn FileLike>
+                }
                 _ => return_errno_with_message!(Errno::EAFNOSUPPORT, "unsupported protocol"),
             }
         }
@@ -69,6 +83,9 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32, ctx: &Context) -> Resu
                 }
                 Ok(StandardNetlinkProtocol::KOBJECT_UEVENT) => {
                     NetlinkUeventSocket::new(is_nonblocking, sock_type) as Arc<dyn FileLike>
+                }
+                Ok(StandardNetlinkProtocol::NETFILTER) => {
+                    NetlinkNetfilterSocket::new(is_nonblocking, sock_type) as Arc<dyn FileLike>
                 }
                 Ok(_) => {
                     return_errno_with_message!(

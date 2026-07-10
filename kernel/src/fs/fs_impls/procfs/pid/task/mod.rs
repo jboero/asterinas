@@ -11,8 +11,8 @@ use crate::{
                 comm::CommFileOps, environ::EnvironFileOps, exe::ExeSymOps, fd::FdDirOps,
                 gid_map::GidMapFileOps, maps::MapsFileOps, mem::MemFileOps,
                 mountinfo::MountInfoFileOps, mounts::MountsFileOps, mountstats::MountStatsFileOps,
-                ns::NsDirOps, oom_score_adj::OomScoreAdjFileOps, stat::StatFileOps,
-                status::StatusFileOps, uid_map::UidMapFileOps,
+                ns::NsDirOps, oom_score_adj::OomScoreAdjFileOps, setgroups::SetgroupsFileOps,
+                stat::StatFileOps, status::StatusFileOps, uid_map::UidMapFileOps,
             },
             template::{
                 ListedEntry, ProcDir, ProcDirOps, ReaddirEntry, keyed_readdir_entries,
@@ -42,9 +42,10 @@ mod mounts;
 mod mountstats;
 mod ns;
 mod oom_score_adj;
+mod setgroups;
 pub(super) mod stat;
 mod status;
-mod uid_map;
+pub(super) mod uid_map;
 
 /// Represents the inode at `/proc/[pid]/task`.
 pub struct TaskDirOps(Arc<PidEntry>);
@@ -122,6 +123,7 @@ impl TidDirOps {
             InodeType::File,
             OomScoreAdjFileOps::new_inode,
         ),
+        ("setgroups", InodeType::File, SetgroupsFileOps::new_inode),
         ("stat", InodeType::File, StatFileOps::new_thread_inode),
         ("status", InodeType::File, StatusFileOps::new_inode),
         ("uid_map", InodeType::File, UidMapFileOps::new_inode),

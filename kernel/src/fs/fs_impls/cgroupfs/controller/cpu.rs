@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
+};
 
 use aster_systree::{Error, MAX_ATTR_SIZE, Result, SysAttrSetBuilder, SysPerms, SysStr};
 use aster_util::{per_cpu_counter::PerCpuCounter, printer::VmPrinter};
 use ostd::{
     cpu::CpuId,
     mm::{VmReader, VmWriter},
-    sync::SpinLock,
+    sync::{LocalIrqDisabled, SpinLock, Waiter},
     task::atomic_mode::AsAtomicModeGuard,
     timer::Jiffies,
     warn,
 };
 
 use crate::{
+    error::Errno,
     fs::cgroupfs::systree_node::{CgroupSysNode, CgroupSystem},
-    process::Process,
+    process::{Process, signal::Pause},
+    time::{clocks::MonotonicClock, timer::Timeout, wait::ManagedTimeout},
     util::ReadCString,
 };
 
@@ -49,7 +54,24 @@ struct CpuControl {
     /// A value stores the configured relative CPU share for scheduler integration.
     weight: AtomicU32,
     /// A value stores the configured CPU bandwidth limit for scheduler integration.
-    max: SpinLock<CpuMax>,
+    ///
+    /// Locked with IRQs disabled because the bandwidth budget is charged from the
+    /// timer interrupt; without this, a process holding the lock could be
+    /// interrupted by the timer on the same CPU and deadlock.
+    max: SpinLock<CpuMax, LocalIrqDisabled>,
+    /// The live bandwidth budget used to enforce `cpu.max`. Locked with IRQs
+    /// disabled for the same reason as `max`.
+    bandwidth: SpinLock<Bandwidth, LocalIrqDisabled>,
+}
+
+/// The live `cpu.max` bandwidth budget for the current period.
+struct Bandwidth {
+    /// Remaining CPU budget (microseconds) in the current period. May go slightly
+    /// negative when a single tick overshoots the quota.
+    runtime_remaining_usec: i64,
+    /// Start of the current period, in milliseconds since boot. `0` forces a
+    /// refill on first use.
+    period_start_ms: u64,
 }
 
 /// A CPU bandwidth limit.
@@ -164,7 +186,55 @@ impl CpuControl {
                 quota_usec: DEFAULT_QUOTA_USEC,
                 period_usec: DEFAULT_PERIOD_USEC,
             }),
+            bandwidth: SpinLock::new(Bandwidth {
+                runtime_remaining_usec: 0,
+                period_start_ms: 0,
+            }),
         }
+    }
+
+    /// The current time in milliseconds since boot.
+    fn now_ms() -> u64 {
+        Jiffies::elapsed().as_duration().as_millis() as u64
+    }
+
+    /// Resets the budget to a full quota if the current period has elapsed.
+    fn refill_if_elapsed(bw: &mut Bandwidth, max: &CpuMax, now_ms: u64) {
+        let period_ms = (max.period_usec / 1000).max(1);
+        if bw.period_start_ms == 0 || now_ms.saturating_sub(bw.period_start_ms) >= period_ms {
+            bw.runtime_remaining_usec = max.quota_usec.min(i64::MAX as u64) as i64;
+            bw.period_start_ms = now_ms;
+        }
+    }
+
+    /// Charges `usec` microseconds of CPU time against the bandwidth budget.
+    fn charge_bandwidth(&self, usec: u64) {
+        let max = *self.max.lock();
+        if max.quota_usec == u64::MAX {
+            return; // unlimited; nothing to enforce
+        }
+        let now = Self::now_ms();
+        let mut bw = self.bandwidth.lock();
+        Self::refill_if_elapsed(&mut bw, &max, now);
+        bw.runtime_remaining_usec -= usec as i64;
+    }
+
+    /// Returns the time remaining in the current period if the budget is
+    /// exhausted (i.e. the cgroup is throttled), or `None` otherwise.
+    fn throttle_remaining(&self) -> Option<Duration> {
+        let max = *self.max.lock();
+        if max.quota_usec == u64::MAX {
+            return None; // unlimited; never throttled
+        }
+        let now = Self::now_ms();
+        let mut bw = self.bandwidth.lock();
+        Self::refill_if_elapsed(&mut bw, &max, now);
+        if bw.runtime_remaining_usec > 0 {
+            return None;
+        }
+        let period_ms = (max.period_usec / 1000).max(1);
+        let period_end = bw.period_start_ms + period_ms;
+        Some(Duration::from_millis(period_end.saturating_sub(now).max(1)))
     }
 }
 
@@ -320,6 +390,22 @@ impl super::SubControlStatic for CpuController {
 }
 
 impl super::SubController<CpuController> {
+    /// Charges `usec` microseconds of CPU bandwidth to this cgroup, if its CPU
+    /// control is active.
+    fn charge_bandwidth(&self, usec: u64) {
+        if let Some(inner) = self.inner.as_ref()
+            && let Ok(control) = inner.control()
+        {
+            control.charge_bandwidth(usec);
+        }
+    }
+
+    /// Returns the throttle deadline for this cgroup, if it is over its
+    /// `cpu.max` budget.
+    fn throttle_remaining(&self) -> Option<Duration> {
+        self.inner.as_ref()?.control().ok()?.throttle_remaining()
+    }
+
     /// Accounts one [`Jiffies`] of CPU time for this cgroup and all of its ancestors.
     fn account_hierarchy(&self, stat_kind: CpuStatKind) {
         // This is race-free because `charge_cpu_time` holds `cgroup_guard` when
@@ -339,6 +425,17 @@ impl super::Controller {
     fn charge_cpu_time<G: AsAtomicModeGuard + ?Sized>(&self, guard: &G, stat_kind: CpuStatKind) {
         self.cpu.read_with(guard).account_hierarchy(stat_kind);
     }
+
+    /// Charges `usec` microseconds of CPU bandwidth to this cgroup's `cpu.max`
+    /// budget.
+    fn charge_cpu_bandwidth(&self, usec: u64) {
+        self.cpu.read().get().charge_bandwidth(usec);
+    }
+
+    /// Returns the throttle deadline if this cgroup is over its `cpu.max` budget.
+    fn cpu_throttle_remaining(&self) -> Option<Duration> {
+        self.cpu.read().get().throttle_remaining()
+    }
 }
 
 /// Charges one [`Jiffies`] of CPU time to `process`'s cgroup hierarchy.
@@ -355,5 +452,65 @@ pub fn charge_cpu_time(process: &Process, stat_kind: CpuStatKind) {
         CgroupSystem::singleton()
             .controller()
             .charge_cpu_time(&cgroup_guard, stat_kind);
+    }
+}
+
+/// Charges `usec` microseconds of CPU bandwidth to `process`'s cgroup for
+/// `cpu.max` enforcement. The root cgroup has no quota, so nothing is charged.
+pub fn charge_cpu_bandwidth(process: &Process, usec: u64) {
+    let cgroup_guard = process.cgroup();
+    if let Some(cgroup) = cgroup_guard.get() {
+        cgroup.controller().charge_cpu_bandwidth(usec);
+    }
+}
+
+/// Returns whether `process`'s cgroup is currently over its `cpu.max` budget.
+///
+/// This is used as a kernel-event condition so that an over-budget task promptly
+/// returns from user space to a safe point where it can be throttled, instead of
+/// running a full scheduler time slice first. Root and unlimited cgroups are
+/// never throttled.
+pub fn is_cpu_throttled(process: &Process) -> bool {
+    let cgroup_guard = process.cgroup();
+    let Some(cgroup) = cgroup_guard.get() else {
+        return false;
+    };
+    cgroup.controller().cpu_throttle_remaining().is_some()
+}
+
+/// Blocks the calling thread while `process`'s cgroup is over its `cpu.max`
+/// budget, returning once the budget refills (or the sleep is interrupted by a
+/// signal). Processes in the root cgroup or with an unlimited `cpu.max` return
+/// immediately, so the init process and ordinary processes are never throttled.
+pub fn throttle_cpu_if_needed(process: &Process) {
+    loop {
+        // Compute the throttle deadline without holding the RCU guard across the
+        // sleep below.
+        let remaining = {
+            let cgroup_guard = process.cgroup();
+            let Some(cgroup) = cgroup_guard.get() else {
+                return;
+            };
+            cgroup.controller().cpu_throttle_remaining()
+        };
+        let Some(remaining) = remaining else {
+            return; // not throttled
+        };
+
+        // Sleep until the period boundary, then re-check; by then the period has
+        // elapsed and the budget refills.
+        let waiter = Waiter::new_pair().0;
+        let res = waiter.pause_until_or_timeout(
+            || None::<()>,
+            ManagedTimeout::new_with_manager(
+                Timeout::After(remaining),
+                MonotonicClock::timer_manager(),
+            ),
+        );
+        // A signal (e.g. SIGKILL) must not be swallowed by throttling: let the
+        // caller handle it instead of sleeping again.
+        if matches!(res, Err(err) if err.error() == Errno::EINTR) {
+            return;
+        }
     }
 }

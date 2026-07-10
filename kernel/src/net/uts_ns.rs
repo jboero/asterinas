@@ -161,7 +161,7 @@ impl UtsName {
     pub const SYSNAME: &str = "Linux";
 
     /// The release name.
-    pub const RELEASE: &str = "5.13.0";
+    pub const RELEASE: &str = "5.13.0-asterinas";
 
     /// The version name.
     pub const VERSION: &str = {

@@ -82,23 +82,72 @@ enum LinkAttrClass {
     PARENT_DEV_BUS_NAME = 57,
 }
 
+/// The wire size of an `ifinfomsg` body (the header of a `VETH_INFO_PEER`
+/// nested attribute). Matches `CIfinfoMsg` in the link segment.
+const IFINFOMSG_SIZE: usize = 16;
+
+// Nested attribute type IDs used when creating links.
+//
+// Reference: <https://elixir.bootlin.com/linux/v6.13/source/include/uapi/linux/if_link.h#L688> (IFLA_INFO_*)
+// and <https://elixir.bootlin.com/linux/v6.13/source/include/uapi/linux/veth.h#L9> (VETH_INFO_PEER).
+const IFLA_INFO_KIND: u16 = 1;
+const IFLA_INFO_DATA: u16 = 2;
+const VETH_INFO_PEER: u16 = 1;
+
+/// The parsed contents of an `IFLA_LINKINFO` nested attribute.
+#[derive(Debug, Default)]
+pub struct LinkInfoData {
+    /// `IFLA_INFO_KIND`, e.g. `"veth"`.
+    pub kind: Option<CString>,
+    /// The peer specification parsed from `IFLA_INFO_DATA` → `VETH_INFO_PEER`,
+    /// present only for `kind == "veth"`.
+    pub veth_peer: Option<VethPeer>,
+}
+
+/// The peer end of a veth pair, as described by a `VETH_INFO_PEER` nested
+/// attribute (an `ifinfomsg` followed by link attributes).
+#[derive(Debug, Default)]
+pub struct VethPeer {
+    /// `IFLA_IFNAME` of the peer end.
+    pub name: Option<CString>,
+    /// `IFLA_NET_NS_PID`: place the peer end in this process's network namespace.
+    pub net_ns_pid: Option<u32>,
+    /// `IFLA_NET_NS_FD`: place the peer end in the namespace referred to by this fd.
+    pub net_ns_fd: Option<u32>,
+}
+
 #[derive(Debug)]
 pub enum LinkAttr {
+    /// `IFLA_ADDRESS`: the interface's L2 (MAC) hardware address.
+    Address([u8; 6]),
     Name(CString),
     Mtu(u32),
     TxqLen(u32),
     LinkMode(u8),
     ExtMask(RtExtFilter),
+    /// `IFLA_MASTER`: enslave the link to the device with this interface index.
+    Master(u32),
+    /// `IFLA_NET_NS_PID`: place the (primary) link in this process's netns.
+    NetNsPid(u32),
+    /// `IFLA_NET_NS_FD`: place the (primary) link in this fd's netns.
+    NetNsFd(u32),
+    /// `IFLA_LINKINFO`: the kind of link to create and its kind-specific data.
+    LinkInfo(LinkInfoData),
 }
 
 impl LinkAttr {
     fn class(&self) -> LinkAttrClass {
         match self {
+            LinkAttr::Address(_) => LinkAttrClass::ADDRESS,
             LinkAttr::Name(_) => LinkAttrClass::IFNAME,
             LinkAttr::Mtu(_) => LinkAttrClass::MTU,
             LinkAttr::TxqLen(_) => LinkAttrClass::TXQLEN,
             LinkAttr::LinkMode(_) => LinkAttrClass::LINKMODE,
             LinkAttr::ExtMask(_) => LinkAttrClass::EXT_MASK,
+            LinkAttr::Master(_) => LinkAttrClass::MASTER,
+            LinkAttr::NetNsPid(_) => LinkAttrClass::NET_NS_PID,
+            LinkAttr::NetNsFd(_) => LinkAttrClass::NET_NS_FD,
+            LinkAttr::LinkInfo(_) => LinkAttrClass::LINKINFO,
         }
     }
 }
@@ -110,11 +159,18 @@ impl Attribute for LinkAttr {
 
     fn payload_as_bytes(&self) -> &[u8] {
         match self {
+            LinkAttr::Address(mac) => mac.as_slice(),
             LinkAttr::Name(name) => name.as_bytes_with_nul(),
             LinkAttr::Mtu(mtu) => mtu.as_bytes(),
             LinkAttr::TxqLen(txq_len) => txq_len.as_bytes(),
             LinkAttr::LinkMode(link_mode) => link_mode.as_bytes(),
             LinkAttr::ExtMask(ext_filter) => ext_filter.as_bytes(),
+            LinkAttr::Master(index) => index.as_bytes(),
+            LinkAttr::NetNsPid(pid) => pid.as_bytes(),
+            LinkAttr::NetNsFd(fd) => fd.as_bytes(),
+            // The kernel never writes `IFLA_LINKINFO` back to user space; this
+            // variant only ever appears on the parse (request) path.
+            LinkAttr::LinkInfo(_) => &[],
         }
     }
 
@@ -154,13 +210,22 @@ impl Attribute for LinkAttr {
                 const { assert!(size_of::<RtExtFilter>() == 4) };
                 Self::ExtMask(reader.read_val_opt::<RtExtFilter>()?.unwrap())
             }
+            (LinkAttrClass::MASTER, 4) => Self::Master(reader.read_val_opt::<u32>()?.unwrap()),
+            (LinkAttrClass::NET_NS_PID, 4) => {
+                Self::NetNsPid(reader.read_val_opt::<u32>()?.unwrap())
+            }
+            (LinkAttrClass::NET_NS_FD, 4) => Self::NetNsFd(reader.read_val_opt::<u32>()?.unwrap()),
+            (LinkAttrClass::LINKINFO, _) => Self::LinkInfo(read_link_info(reader, payload_len)?),
 
             (
                 LinkAttrClass::IFNAME
                 | LinkAttrClass::MTU
                 | LinkAttrClass::TXQLEN
                 | LinkAttrClass::LINKMODE
-                | LinkAttrClass::EXT_MASK,
+                | LinkAttrClass::EXT_MASK
+                | LinkAttrClass::MASTER
+                | LinkAttrClass::NET_NS_PID
+                | LinkAttrClass::NET_NS_FD,
                 _,
             ) => {
                 warn!("link attribute `{:?}` contains invalid payload", class);
@@ -185,6 +250,127 @@ impl Attribute for LinkAttr {
         Ok(ContinueRead::Parsed(res))
     }
 }
+
+/// Iterates the sub-attributes packed into the next `budget` bytes of `reader`,
+/// invoking `handle(type_, payload_len, reader)` for each. `handle` must consume
+/// exactly `payload_len` bytes. Trailing per-attribute padding and any leftover
+/// bytes are skipped so that exactly `budget` bytes are consumed overall.
+fn for_each_sub_attr(
+    reader: &mut dyn MultiRead,
+    mut budget: usize,
+    mut handle: impl FnMut(u16, usize, &mut dyn MultiRead) -> Result<()>,
+) -> Result<()> {
+    while budget >= size_of::<CAttrHeader>() {
+        let Some(header) = reader.read_val_opt::<CAttrHeader>()? else {
+            return Ok(());
+        };
+        budget -= size_of::<CAttrHeader>();
+
+        // A declared total length below the header size is malformed; bail before
+        // `payload_len()` (which subtracts the header size) can underflow.
+        if header.total_len() < size_of::<CAttrHeader>() {
+            reader.skip_some(budget);
+            return Ok(());
+        }
+
+        let payload_len = header.payload_len();
+        if payload_len > budget {
+            // Malformed: the declared payload exceeds the remaining budget.
+            reader.skip_some(budget);
+            return Ok(());
+        }
+
+        handle(header.type_(), payload_len, reader)?;
+        budget -= payload_len;
+
+        let padding = budget.min(header.padding_len());
+        reader.skip_some(padding);
+        budget -= padding;
+    }
+
+    if budget > 0 {
+        reader.skip_some(budget);
+    }
+    Ok(())
+}
+
+/// Reads a NUL-terminated string of at most `max` bytes from a `payload_len`-byte
+/// attribute payload, skipping any remaining payload bytes.
+fn read_cstring_field(
+    reader: &mut dyn MultiRead,
+    payload_len: usize,
+    max: usize,
+) -> Result<CString> {
+    let (string, consumed) = reader.read_cstring_until_end(max.min(payload_len))?;
+    if consumed < payload_len {
+        reader.skip_some(payload_len - consumed);
+    }
+    Ok(string)
+}
+
+/// Parses an `IFLA_LINKINFO` payload (`IFLA_INFO_KIND` + `IFLA_INFO_DATA`).
+fn read_link_info(reader: &mut dyn MultiRead, budget: usize) -> Result<LinkInfoData> {
+    let mut data = LinkInfoData::default();
+    for_each_sub_attr(reader, budget, |type_, payload_len, reader| {
+        match type_ {
+            IFLA_INFO_KIND => {
+                data.kind = Some(read_cstring_field(reader, payload_len, IFNAME_SIZE)?)
+            }
+            IFLA_INFO_DATA => data.veth_peer = read_info_data(reader, payload_len)?,
+            _ => reader.skip_some(payload_len),
+        }
+        Ok(())
+    })?;
+    Ok(data)
+}
+
+/// Parses an `IFLA_INFO_DATA` payload, extracting the `VETH_INFO_PEER` if present.
+fn read_info_data(reader: &mut dyn MultiRead, budget: usize) -> Result<Option<VethPeer>> {
+    let mut peer = None;
+    for_each_sub_attr(reader, budget, |type_, payload_len, reader| {
+        if type_ == VETH_INFO_PEER {
+            peer = Some(read_veth_peer(reader, payload_len)?);
+        } else {
+            reader.skip_some(payload_len);
+        }
+        Ok(())
+    })?;
+    Ok(peer)
+}
+
+/// Parses a `VETH_INFO_PEER` payload: an `ifinfomsg` header (ignored) followed by
+/// link attributes describing the peer (its name and target network namespace).
+fn read_veth_peer(reader: &mut dyn MultiRead, payload_len: usize) -> Result<VethPeer> {
+    let mut peer = VethPeer::default();
+    if payload_len < IFINFOMSG_SIZE {
+        reader.skip_some(payload_len);
+        return Ok(peer);
+    }
+    // The peer's `ifinfomsg` carries flags/index we don't need at creation time.
+    reader.skip_some(IFINFOMSG_SIZE);
+
+    for_each_sub_attr(
+        reader,
+        payload_len - IFINFOMSG_SIZE,
+        |type_, len, reader| {
+            match type_ {
+                IFLA_IFNAME_TYPE => peer.name = Some(read_cstring_field(reader, len, IFNAME_SIZE)?),
+                IFLA_NET_NS_PID_TYPE if len == 4 => {
+                    peer.net_ns_pid = reader.read_val_opt::<u32>()?
+                }
+                IFLA_NET_NS_FD_TYPE if len == 4 => peer.net_ns_fd = reader.read_val_opt::<u32>()?,
+                _ => reader.skip_some(len),
+            }
+            Ok(())
+        },
+    )?;
+    Ok(peer)
+}
+
+// `IFLA_*` type IDs used inside a `VETH_INFO_PEER`, matching `LinkAttrClass`.
+const IFLA_IFNAME_TYPE: u16 = LinkAttrClass::IFNAME as u16;
+const IFLA_NET_NS_PID_TYPE: u16 = LinkAttrClass::NET_NS_PID as u16;
+const IFLA_NET_NS_FD_TYPE: u16 = LinkAttrClass::NET_NS_FD as u16;
 
 bitflags! {
     /// New extended info filters for [`NlLinkAttr::ExtMask`].

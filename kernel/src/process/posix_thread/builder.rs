@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 #[cfg(target_arch = "x86_64")]
 use ostd::arch::cpu::context::{FsBase, GsBase};
@@ -206,6 +206,9 @@ impl PosixThreadBuilder {
                     tracees: Once::new(),
                     exit_code: AtomicU32::new(0),
                     personality: AtomicU32::new(0),
+                    no_new_privs: AtomicBool::new(false),
+                    seccomp: crate::seccomp::SeccompState::new(),
+                    mac_tenant: AtomicU32::new(0),
                 }
             };
 

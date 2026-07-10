@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{
-    ExitCode, Pid, Process,
+    ExitCode, Pid, PidNamespace, Process,
     process_filter::ProcessFilter,
     signal::{constants::SIGCHLD, with_sigmask_changed},
 };
@@ -126,9 +126,16 @@ pub enum WaitStatus {
 }
 
 impl WaitStatus {
-    pub fn pid(&self) -> Pid {
+    /// Returns the waited-for PID as seen from the PID namespace `ns`.
+    ///
+    /// This is what `wait4`/`waitid` report to the waiter, so the PID is
+    /// translated into the waiter's namespace. (Tracee threads are not yet
+    /// renumbered and report their global TID.)
+    pub fn pid_in_ns(&self, ns: &Arc<PidNamespace>) -> Pid {
         match self.source() {
-            WaitStatusSource::Process(process) => process.pid(),
+            WaitStatusSource::Process(process) => {
+                process.pid_nr_in(ns).unwrap_or_else(|| process.pid())
+            }
             WaitStatusSource::Thread(thread) => thread.tid(),
         }
     }

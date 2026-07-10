@@ -19,7 +19,7 @@ use ostd::sync::{SpinLock, SpinLockGuard};
 use smoltcp::{
     iface::{Context, packet::Packet},
     phy::Device,
-    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Packet},
+    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv4Packet, Ipv6Address, Ipv6Packet},
 };
 
 use super::{
@@ -32,7 +32,7 @@ use super::{
 use crate::{
     errors::BindError,
     ext::Ext,
-    socket::{TcpListenerBg, UdpSocketBg},
+    socket::{IcmpSocketBg, TcpListenerBg, UdpSocketBg},
     socket_table::SocketTable,
 };
 
@@ -41,6 +41,10 @@ pub struct IfaceCommon<E: Ext> {
     name: CString,
     type_: InterfaceType,
     flags: InterfaceFlags,
+    /// The L2 (MAC) address for Ethernet-medium interfaces; `None` for IP-medium
+    /// ones (loopback, veth, bridge). Stored explicitly because smoltcp's
+    /// `Interface::hardware_addr()` panics on non-Ethernet media.
+    mac: Option<[u8; 6]>,
 
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
@@ -85,6 +89,7 @@ impl<E: Ext> IfaceCommon<E> {
         name: CString,
         type_: InterfaceType,
         flags: InterfaceFlags,
+        mac: Option<[u8; 6]>,
         interface: smoltcp::iface::Interface,
         sched_poll: E::ScheduleNextPoll,
     ) -> Self {
@@ -95,6 +100,7 @@ impl<E: Ext> IfaceCommon<E> {
             name,
             type_,
             flags,
+            mac,
             interface: SpinLock::new(PollableIface::new(interface)),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
@@ -122,12 +128,28 @@ impl<E: Ext> IfaceCommon<E> {
         self.interface.lock().ipv4_addr()
     }
 
+    pub(super) fn mac(&self) -> Option<[u8; 6]> {
+        self.mac
+    }
+
     pub(super) fn ipv6_addr(&self) -> Option<Ipv6Address> {
         self.interface.lock().ipv6_addr()
     }
 
     pub(super) fn prefix_len(&self) -> Option<u8> {
         self.interface.lock().prefix_len()
+    }
+
+    pub(super) fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
+        self.interface.lock().set_ipv4_cidr(cidr);
+    }
+
+    pub(super) fn ipv4_gateway(&self) -> Option<Ipv4Address> {
+        self.interface.lock().ipv4_gateway()
+    }
+
+    pub(super) fn add_ipv4_route(&self, cidr: Ipv4Cidr, gateway: Ipv4Address) {
+        self.interface.lock().add_ipv4_route(cidr, gateway);
     }
 
     pub(super) fn sched_poll(&self) -> &E::ScheduleNextPoll {
@@ -175,6 +197,15 @@ impl<E: Ext> IfaceCommon<E> {
             .map(BoundUdpPort)
     }
 
+    pub(super) fn bind_icmp(
+        &self,
+        iface: Arc<dyn Iface<E>>,
+        config: BindPortConfig,
+    ) -> Result<BoundIcmpPort<E>, BindError> {
+        self.bind(iface, config, PortProtocol::Icmp)
+            .map(BoundIcmpPort)
+    }
+
     fn bind(
         &self,
         iface: Arc<dyn Iface<E>>,
@@ -215,6 +246,17 @@ impl<E: Ext> IfaceCommon<E> {
     pub(crate) fn remove_udp_socket(&self, socket: &Arc<UdpSocketBg<E>>) {
         let mut sockets = self.sockets.lock();
         let removed = sockets.remove_udp_socket(socket);
+        debug_assert!(removed.is_some());
+    }
+
+    pub(crate) fn register_icmp_socket(&self, socket: Arc<IcmpSocketBg<E>>) {
+        let mut sockets = self.sockets.lock();
+        sockets.insert_icmp_socket(socket);
+    }
+
+    pub(crate) fn remove_icmp_socket(&self, socket: &Arc<IcmpSocketBg<E>>) {
+        let mut sockets = self.sockets.lock();
+        let removed = sockets.remove_icmp_socket(socket);
         debug_assert!(removed.is_some());
     }
 }
@@ -333,6 +375,9 @@ impl<E: Ext> Drop for BoundPort<E> {
 pub struct BoundTcpPort<E: Ext>(BoundPort<E>);
 /// A UDP port bound to an iface.
 pub struct BoundUdpPort<E: Ext>(BoundPort<E>);
+/// An ICMP echo identifier bound to an iface (the identifier reuses the port
+/// allocation machinery, as both are unique 16-bit values).
+pub struct BoundIcmpPort<E: Ext>(BoundPort<E>);
 
 impl<E: Ext> Deref for BoundTcpPort<E> {
     type Target = BoundPort<E>;
@@ -341,6 +386,12 @@ impl<E: Ext> Deref for BoundTcpPort<E> {
     }
 }
 impl<E: Ext> Deref for BoundUdpPort<E> {
+    type Target = BoundPort<E>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<E: Ext> Deref for BoundIcmpPort<E> {
     type Target = BoundPort<E>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -358,6 +409,9 @@ struct PortKey {
 enum PortProtocol {
     Tcp,
     Udp,
+    /// ICMP sockets have no ports; the "port" is the ICMP echo identifier,
+    /// which shares the uniqueness requirements of a port.
+    Icmp,
 }
 
 struct PortState {

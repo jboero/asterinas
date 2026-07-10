@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod bridge;
+mod veth;
+
+pub use bridge::{BridgeHub, BridgeLocalDevice, BridgePortDevice, set_router};
 pub use smoltcp::phy::{
     Checksum, ChecksumCapabilities, Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken,
 };
+pub use veth::{VethChannel, VethDevice, VethNotifier};
 
 /// A trait that allows to obtain a mutable reference of [`Device`].
 ///

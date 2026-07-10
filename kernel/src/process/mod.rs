@@ -29,8 +29,9 @@ pub use execve::do_execve;
 pub use kill::{kill, kill_all, kill_group, tgkill};
 pub use namespace::{
     nsproxy::{ContextSetNsAdminApi, NsProxy, NsProxyBuilder, check_unsupported_ns_flags},
+    pid_ns::PidNamespace,
     unshare::ContextUnshareAdminApi,
-    user_ns::UserNamespace,
+    user_ns::{IdMapKind, UserNamespace},
 };
 pub use pid_file::PidFile;
 pub use process::{

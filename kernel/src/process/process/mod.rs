@@ -26,7 +26,7 @@ use crate::{
     fs::cgroupfs::CgroupNode,
     prelude::*,
     process::{
-        UserNamespace, WaitOptions,
+        PidNamespace, UserNamespace, WaitOptions,
         signal::{Pollee, sig_queues::SigQueues},
         status::StopWaitStatus,
     },
@@ -85,7 +85,14 @@ pub(super) fn init_on_each_cpu() {
 /// Process stands for a set of threads that shares the same userspace.
 pub struct Process {
     // Immutable Part
+    /// The process ID in the *initial* PID namespace. This is the canonical,
+    /// globally unique identifier used by the PID table.
     pid: Pid,
+    /// The PID namespace this process belongs to.
+    pid_ns: Arc<PidNamespace>,
+    /// The process ID in its own PID namespace ([`Self::pid_ns`]). Equal to
+    /// [`Self::pid`] for processes in the initial namespace.
+    vpid: Pid,
 
     vmar: Mutex<Option<Arc<Vmar>>>,
     /// Wait for child status changed
@@ -225,8 +232,11 @@ impl Process {
         Some(Task::current()?.as_posix_thread()?.process())
     }
 
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn new(
         pid: Pid,
+        pid_ns: Arc<PidNamespace>,
+        vpid: Pid,
         vmar: Arc<Vmar>,
 
         resource_limits: ResourceLimits,
@@ -245,6 +255,8 @@ impl Process {
 
             Self {
                 pid,
+                pid_ns,
+                vpid,
                 vmar: Mutex::new(Some(vmar)),
                 children_wait_queue,
                 pidfile_pollee: Pollee::new(),
@@ -289,6 +301,37 @@ impl Process {
 
     pub fn pid(&self) -> Pid {
         self.pid
+    }
+
+    /// Returns the PID namespace this process belongs to.
+    pub fn pid_ns(&self) -> &Arc<PidNamespace> {
+        &self.pid_ns
+    }
+
+    /// Returns the process ID as seen from within its own PID namespace.
+    ///
+    /// This is the value returned by `getpid()`. For a process in the initial
+    /// namespace it equals [`Self::pid`]; for the first process in a new
+    /// namespace it is 1.
+    pub fn vpid(&self) -> Pid {
+        self.vpid
+    }
+
+    /// Returns this process's PID number as seen from `ns`, or `None` if the
+    /// process is not visible in `ns` (i.e. `ns` is not its namespace or an
+    /// ancestor of it).
+    ///
+    /// Translation across more than one nesting level is not yet implemented;
+    /// for deeper nesting this returns the number only for the process's own
+    /// namespace and the initial namespace.
+    pub fn pid_nr_in(&self, ns: &Arc<PidNamespace>) -> Option<Pid> {
+        if Arc::ptr_eq(&self.pid_ns, ns) {
+            Some(self.vpid)
+        } else if ns.is_init() {
+            Some(self.pid)
+        } else {
+            None
+        }
     }
 
     /// Gets the profiling clock of the process.

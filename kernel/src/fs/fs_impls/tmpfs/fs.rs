@@ -48,3 +48,31 @@ impl FsType for TmpFsType {
         None
     }
 }
+
+/// The `mqueue` filesystem, used to expose POSIX message queues at
+/// `/dev/mqueue`. Container runtimes (runc/containerd) mount it unconditionally,
+/// so it must exist for a container to start.
+///
+/// Asterinas does not yet implement POSIX message-queue semantics, so this is
+/// backed by a plain tmpfs: the mount succeeds (letting containers start) but
+/// the directory behaves like an ordinary tmpfs rather than a real mqueue.
+// TODO: Implement real POSIX message-queue semantics (mq_open/mq_send/...).
+pub(super) struct MqueueFsType;
+
+impl FsType for MqueueFsType {
+    fn name(&self) -> &'static str {
+        "mqueue"
+    }
+
+    fn properties(&self) -> FsProperties {
+        FsProperties::empty()
+    }
+
+    fn create(&self, _fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
+        Ok(TmpFs::new_tmpfs())
+    }
+
+    fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysNode>> {
+        None
+    }
+}

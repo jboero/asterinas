@@ -12,7 +12,10 @@ use ostd::{
 
 use super::process_vm::activate_vmar;
 use crate::{
-    fs::vfs::{inode::Inode, path::Path},
+    fs::vfs::{
+        inode::Inode,
+        path::{Path, PerMountFlags},
+    },
     prelude::*,
     process::{
         ContextUnshareAdminApi, Credentials, Gid, Process, Uid, pid_table,
@@ -33,6 +36,7 @@ use crate::{
 
 pub fn do_execve(
     elf_file: Path,
+    exec_path: CString,
     thread_name: ThreadName,
     argv_ptr_ptr: Vaddr,
     envp_ptr_ptr: Vaddr,
@@ -47,6 +51,14 @@ pub fn do_execve(
     let argv = read_cstring_vec(argv_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
     let envp = read_cstring_vec(envp_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
 
+    // Mount security: refuse to execute a binary from a `noexec` mount. This,
+    // together with the `nosuid` enforcement below, is what makes a writable
+    // container volume safe — code dropped there cannot run, and a setuid binary
+    // there cannot escalate.
+    if elf_file.mount_flags().contains(PerMountFlags::NOEXEC) {
+        return_errno_with_message!(Errno::EACCES, "execute denied: noexec mount");
+    }
+
     let fs_ref = ctx.thread_local.borrow_fs();
     let path_resolver = fs_ref.resolver().read();
 
@@ -58,7 +70,7 @@ pub fn do_execve(
     );
 
     let program_to_load =
-        ProgramToLoad::build_from_file(elf_file.clone(), &path_resolver, argv, envp)?;
+        ProgramToLoad::build_from_file(elf_file.clone(), &path_resolver, argv, envp, exec_path)?;
 
     let new_vmar = VmarHandle::new(ProcessVm::new(elf_file.clone()));
     let elf_load_info = program_to_load.load_to_vmar(&new_vmar, &path_resolver)?;
@@ -168,7 +180,10 @@ fn do_execve_no_return(
     // This prevents race conditions when checking access permissions while opening
     // `/proc/[pid]/mem` or `/proc/[pid]/maps`.
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
-    apply_caps_from_exec(process, ctx.credentials_mut(), elf_file.inode())?;
+    // A `nosuid` mount disables the set-uid/set-gid bits, so a setuid-root binary
+    // placed in a container volume cannot escalate.
+    let nosuid = elf_file.mount_flags().contains(PerMountFlags::NOSUID);
+    apply_caps_from_exec(process, ctx.credentials_mut(), elf_file.inode(), nosuid)?;
     drop(vmar_guard);
     drop(old_vmar);
 
@@ -310,14 +325,17 @@ fn apply_caps_from_exec(
     process: &Process,
     credentials: Credentials<ReadWriteOp>,
     elf_inode: &Arc<dyn Inode>,
+    nosuid: bool,
 ) -> Result<()> {
     let mode = elf_inode.mode()?;
-    let set_uid = if mode.has_set_uid() {
+    // A `nosuid` mount disables the set-user-ID / set-group-ID bits, so a file
+    // on such a mount (e.g. a hardened container volume) never gains privilege.
+    let set_uid = if !nosuid && mode.has_set_uid() {
         Some(elf_inode.owner()?)
     } else {
         None
     };
-    let set_gid = if mode.has_set_gid() {
+    let set_gid = if !nosuid && mode.has_set_gid() {
         Some(elf_inode.group()?)
     } else {
         None

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::borrow::Cow;
-
 use cpio_decoder::{CpioDecoder, CpioEntry, FileMetadata, FileType};
 use device_id::{DeviceId, MajorId, MinorId};
 use lending_iterator::LendingIterator;
 use no_std_io2::io::{Cursor, Read};
 use ostd::boot::boot_info;
+use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
+use ruzstd::io::Read as ZstdRead;
 use zune_inflate::DeflateDecoder;
 
 use super::{
@@ -14,6 +14,34 @@ use super::{
     vfs::path::{FsPath, PathResolver, is_dot},
 };
 use crate::{fs::vfs::inode::MknodType, prelude::*};
+
+struct BoxedReader<'a>(Box<dyn Read + 'a>);
+
+impl<'a> BoxedReader<'a> {
+    pub fn new(reader: Box<dyn Read + 'a>) -> Self {
+        BoxedReader(reader)
+    }
+}
+
+impl Read for BoxedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> no_std_io2::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+/// Adapts ruzstd's streaming zstd decoder — which speaks ruzstd's own `no_std`
+/// `Read` — to the `no_std_io2::io::Read` that [`BoxedReader`] and the cpio
+/// decoder consume, so a zstd-compressed initramfs streams through the same
+/// unpack path as a gzip one (no full-buffer decompression into memory).
+struct ZstdReader<R: ZstdRead>(StreamingDecoder<R, FrameDecoder>);
+
+impl<R: ZstdRead> Read for ZstdReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> no_std_io2::io::Result<usize> {
+        ZstdRead::read(&mut self.0, buf).map_err(|_| {
+            no_std_io2::io::Error::new(no_std_io2::io::ErrorKind::Other, "zstd decode error")
+        })
+    }
+}
 
 /// Unpack and prepare the rootfs from the initramfs CPIO buffer.
 pub fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
@@ -27,14 +55,20 @@ pub fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
             let decompressed = DeflateDecoder::new(initramfs_buf)
                 .decode_gzip()
                 .map_err(|_| Error::with_message(Errno::EINVAL, "gzip decompression failed"))?;
-            (Cow::Owned(decompressed), ".gz")
+            (BoxedReader::new(Box::new(Cursor::new(decompressed))), ".gz")
         }
-        _ => (Cow::Borrowed(initramfs_buf), ""),
+        // Zstandard magic number: 0x28 0xB5 0x2F 0xFD
+        &[0x28, 0xB5, 0x2F, 0xFD] => {
+            let zstd_decoder = StreamingDecoder::new(initramfs_buf)
+                .map_err(|_| Error::with_message(Errno::EINVAL, "invalid zstd buffer"))?;
+            (BoxedReader::new(Box::new(ZstdReader(zstd_decoder))), ".zst")
+        }
+        _ => (BoxedReader::new(Box::new(Cursor::new(initramfs_buf))), ""),
     };
 
     println!("[kernel] unpacking initramfs.cpio{} to rootfs ...", suffix);
 
-    let mut decoder = CpioDecoder::new(Cursor::new(reader));
+    let mut decoder = CpioDecoder::new(reader);
 
     while let Some(entry_result) = decoder.next() {
         let mut entry = entry_result?;

@@ -53,7 +53,7 @@ pub fn sys_waitid(
     if infoq_addr != 0 {
         let siginfo = {
             let (si_code, si_status) = calculate_si_code_and_si_status(&wait_status);
-            let pid = wait_status.pid();
+            let pid = wait_status.pid_in_ns(ctx.process.pid_ns());
             let uid = wait_status.uid();
 
             let mut siginfo = siginfo_t::new(SIGCHLD, si_code);

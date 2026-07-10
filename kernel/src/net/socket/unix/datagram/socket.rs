@@ -10,7 +10,9 @@ use crate::{
     fs::{pseudofs::SockFs, vfs::path::Path},
     net::socket::{
         Socket,
-        options::{Error as SocketError, PeerCred, SocketOption, macros::sock_option_mut},
+        options::{
+            Error as SocketError, PeerCred, SocketOption, SocketType, macros::sock_option_mut,
+        },
         private::SocketPrivate,
         unix::{CUserCred, UnixSocketAddr, cred::SocketCred, ctrl_msg::AuxiliaryData},
         util::{
@@ -213,6 +215,10 @@ impl Socket for UnixDatagramSocket {
             socket_errors @ SocketError => {
                 // TODO: Support socket errors for UNIX sockets
                 socket_errors.set(None);
+                return Ok(());
+            }
+            socket_type @ SocketType => {
+                socket_type.set(SockType::SOCK_DGRAM as i32);
                 return Ok(());
             }
             _ => (),

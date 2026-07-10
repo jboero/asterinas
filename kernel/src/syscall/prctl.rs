@@ -4,6 +4,7 @@ use ostd::mm::VmIo;
 
 use super::SyscallReturn;
 use crate::{
+    fs::file::file_table::{RawFileDesc, get_file_fast},
     prelude::*,
     process::{
         credentials::{SecureBits, capabilities::CapSet},
@@ -140,6 +141,161 @@ pub fn sys_prctl(
                 credentials.clear_ambient_capset();
             }
         },
+        PrctlCmd::PR_SET_NO_NEW_PRIVS => {
+            ctx.posix_thread.set_no_new_privs();
+        }
+        PrctlCmd::PR_GET_NO_NEW_PRIVS => {
+            return Ok(SyscallReturn::Return(ctx.posix_thread.no_new_privs() as _));
+        }
+        PrctlCmd::PR_GET_SECCOMP => {
+            // Report the calling thread's actual seccomp mode (0 = disabled,
+            // 1 = strict, 2 = filter). Returning a value (rather than EINVAL) is
+            // also what makes a container runtime's "is seccomp supported?"
+            // probe conclude seccomp is available — which the kubelet requires,
+            // since it pins the pod sandbox (pause) to the RuntimeDefault
+            // profile and containerd rejects a node that reports no seccomp.
+            return Ok(SyscallReturn::Return(ctx.posix_thread.seccomp().mode() as _));
+        }
+        PrctlCmd::PR_SET_SECCOMP { mode, filter_ptr } => {
+            // Legacy filter-install path. Modern runtimes use the seccomp(2)
+            // syscall, but honor prctl too so older tooling enforces as well.
+            const SECCOMP_MODE_STRICT: u64 = 1;
+            const SECCOMP_MODE_FILTER: u64 = 2;
+            match mode {
+                SECCOMP_MODE_STRICT => super::seccomp::do_set_mode_strict(ctx),
+                SECCOMP_MODE_FILTER => super::seccomp::do_set_mode_filter(filter_ptr, ctx)?,
+                _ => return_errno_with_message!(Errno::EINVAL, "unsupported seccomp mode"),
+            }
+        }
+        PrctlCmd::PR_ASTERKUBE_DNAT {
+            vip,
+            backend,
+            ports,
+            proto,
+        } => {
+            // Temporary scaffolding to drive the Service DNAT datapath until the
+            // nftables-compatible netlink surface exists. Requires CAP_NET_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::NET_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "installing a DNAT rule requires CAP_NET_ADMIN"
+                );
+            }
+            // Each call adds one backend endpoint; repeated calls for the same
+            // VIP build up its backend set (load-balanced Service endpoints).
+            aster_bigtcp::nat::nat_table().add_dnat(
+                vip.to_be_bytes(),
+                (ports >> 16) as u16,
+                proto as u8,
+                backend.to_be_bytes(),
+                (ports & 0xffff) as u16,
+            );
+        }
+        PrctlCmd::PR_ASTERKUBE_MASQ { bridge_index } => {
+            // Temporary scaffolding to mark a bridge as a masquerade uplink.
+            // Requires CAP_NET_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::NET_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "marking a masquerade uplink requires CAP_NET_ADMIN"
+                );
+            }
+            crate::net::iface::mark_bridge_uplink(bridge_index);
+        }
+        PrctlCmd::PR_ASTERKUBE_SETTENANT(tenant) => {
+            // Assign the calling thread's astromac tenant label (multi-tenant
+            // MAC). Requires CAP_SYS_ADMIN — only a pod launcher labels pods.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "setting an astromac tenant label requires CAP_SYS_ADMIN"
+                );
+            }
+            ctx.posix_thread.set_mac_tenant(tenant);
+        }
+        PrctlCmd::PR_ASTERKUBE_MAC_MODE(mode) => {
+            // Set the global astromac enforcement mode. set_mode performs its own
+            // CAP_SYS_ADMIN check against the init user namespace.
+            let mode = crate::security::lsm::astromac::MacMode::try_from(mode)
+                .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astromac mode"))?;
+            crate::security::lsm::astromac::set_mode(mode)?;
+        }
+        PrctlCmd::PR_ASTERKUBE_LABEL_IP { ipv4, tenant } => {
+            // Assign (or clear, with tenant 0) the astromac tenant label of an
+            // IPv4 endpoint. Requires CAP_SYS_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "labeling an IP requires CAP_SYS_ADMIN"
+                );
+            }
+            crate::security::lsm::astromac::label_ip(ipv4, tenant);
+        }
+        PrctlCmd::PR_ASTERKUBE_LABEL_FD { fd, tenant } => {
+            // Assign (or clear, with tenant 0) the astromac tenant label of the
+            // file referred to by `fd`. Requires CAP_SYS_ADMIN.
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_ADMIN)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "labeling a file requires CAP_SYS_ADMIN"
+                );
+            }
+            let metadata = {
+                let mut file_table = ctx.thread_local.borrow_file_table_mut();
+                let file = get_file_fast!(&mut file_table, (fd as RawFileDesc).try_into()?);
+                file.path().metadata()
+            };
+            crate::security::lsm::astromac::label_file(
+                metadata.container_dev_id.as_encoded_u64(),
+                metadata.ino,
+                tenant,
+            );
+        }
+        PrctlCmd::PR_ASTERKUBE_ACPI => {
+            // Arm the ACPI power-button monitor so an orderly host poweroff
+            // (QEMU `system_powerdown` / virsh shutdown) is delivered to PID 1
+            // as SIGINT for graceful node drain. Spawning the monitor thread
+            // from this fully-scheduled syscall context avoids the early-boot
+            // deadlock of spawning a self-blocking thread before the idle loop.
+            // Requires CAP_SYS_BOOT (the init holds it).
+            if !ctx
+                .posix_thread
+                .credentials()
+                .effective_capset()
+                .contains(CapSet::SYS_BOOT)
+            {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "arming the ACPI power-button monitor requires CAP_SYS_BOOT"
+                );
+            }
+            crate::arch::init_late();
+        }
     }
 
     Ok(SyscallReturn::Return(0))
@@ -153,6 +309,8 @@ const PR_GET_KEEPCAPS: i32 = 7;
 const PR_SET_KEEPCAPS: i32 = 8;
 const PR_SET_NAME: i32 = 15;
 const PR_GET_NAME: i32 = 16;
+const PR_GET_SECCOMP: i32 = 21;
+const PR_SET_SECCOMP: i32 = 22;
 const PR_CAPBSET_READ: i32 = 23;
 const PR_CAPBSET_DROP: i32 = 24;
 const PR_GET_SECUREBITS: i32 = 27;
@@ -162,6 +320,33 @@ const PR_GET_TIMERSLACK: i32 = 30;
 const PR_SET_CHILD_SUBREAPER: i32 = 36;
 const PR_GET_CHILD_SUBREAPER: i32 = 37;
 const PR_CAP_AMBIENT: i32 = 47;
+const PR_SET_NO_NEW_PRIVS: i32 = 38;
+const PR_GET_NO_NEW_PRIVS: i32 = 39;
+
+/// A non-Linux astrokube extension: install a Service (ClusterIP) DNAT rule.
+/// `arg2`/`arg3` are the VIP and backend IPv4 addresses as big-endian `u32`,
+/// `arg4` packs `(vport << 16) | bport`, `arg5` is the IP protocol. Temporary
+/// scaffolding that drives the kernel NAT datapath until the nftables-compatible
+/// netlink surface exists.
+const PR_ASTERKUBE_DNAT: i32 = 0x4b55_4244; // "KUBD"
+
+/// A non-Linux astrokube extension: mark a bridge (by its interface index in
+/// `arg2`) as a masquerade uplink, so traffic forwarded onto it is source-NATed
+/// to the uplink's address. Temporary scaffolding alongside [`PR_ASTERKUBE_DNAT`].
+const PR_ASTERKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
+
+/// A non-Linux astrokube extension: arm the ACPI power-button monitor so an
+/// orderly host poweroff is delivered to PID 1 as SIGINT for a graceful node
+/// drain. Called once by the init after the node is up; takes no arguments.
+const PR_ASTERKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
+/// astrokube: set the calling thread's astromac tenant label (arg2 = tenant id).
+const PR_ASTERKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
+/// astrokube: set the global astromac mode (arg2 = MacMode: 0/1/2).
+const PR_ASTERKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
+/// astrokube: label the file at fd (arg2 = fd) with a tenant (arg3 = tenant).
+const PR_ASTERKUBE_LABEL_FD: i32 = 0x4b55_464c; // "KUFL"
+/// astrokube: label an IPv4 endpoint (arg2 = ip, be u32) with a tenant (arg3).
+const PR_ASTERKUBE_LABEL_IP: i32 = 0x4b55_4950; // "KUIP"
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -183,6 +368,24 @@ enum PrctlCmd {
     PR_SET_CHILD_SUBREAPER(bool),
     PR_GET_CHILD_SUBREAPER(Vaddr),
     PR_CAP_AMBIENT(CapAmbientCmd),
+    PR_SET_NO_NEW_PRIVS,
+    PR_GET_NO_NEW_PRIVS,
+    PR_GET_SECCOMP,
+    PR_SET_SECCOMP { mode: u64, filter_ptr: Vaddr },
+    PR_ASTERKUBE_DNAT {
+        vip: u32,
+        backend: u32,
+        ports: u32,
+        proto: u32,
+    },
+    PR_ASTERKUBE_MASQ {
+        bridge_index: u32,
+    },
+    PR_ASTERKUBE_ACPI,
+    PR_ASTERKUBE_SETTENANT(u32),
+    PR_ASTERKUBE_MAC_MODE(u32),
+    PR_ASTERKUBE_LABEL_FD { fd: u32, tenant: u32 },
+    PR_ASTERKUBE_LABEL_IP { ipv4: u32, tenant: u32 },
 }
 
 #[repr(u64)]
@@ -233,6 +436,40 @@ impl PrctlCmd {
             PR_CAP_AMBIENT => Ok(PrctlCmd::PR_CAP_AMBIENT(CapAmbientCmd::from_args(
                 arg2, arg3, arg4, arg5,
             )?)),
+            PR_SET_NO_NEW_PRIVS => {
+                // Linux only allows turning the flag on (arg2 must be 1, and
+                // arg3..arg5 must be 0).
+                if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                    return_errno_with_message!(Errno::EINVAL, "invalid PR_SET_NO_NEW_PRIVS args");
+                }
+                Ok(PrctlCmd::PR_SET_NO_NEW_PRIVS)
+            }
+            PR_GET_NO_NEW_PRIVS => Ok(PrctlCmd::PR_GET_NO_NEW_PRIVS),
+            PR_GET_SECCOMP => Ok(PrctlCmd::PR_GET_SECCOMP),
+            PR_SET_SECCOMP => Ok(PrctlCmd::PR_SET_SECCOMP {
+                mode: arg2,
+                filter_ptr: arg3 as _,
+            }),
+            PR_ASTERKUBE_DNAT => Ok(PrctlCmd::PR_ASTERKUBE_DNAT {
+                vip: arg2 as u32,
+                backend: arg3 as u32,
+                ports: arg4 as u32,
+                proto: arg5 as u32,
+            }),
+            PR_ASTERKUBE_MASQ => Ok(PrctlCmd::PR_ASTERKUBE_MASQ {
+                bridge_index: arg2 as u32,
+            }),
+            PR_ASTERKUBE_ACPI => Ok(PrctlCmd::PR_ASTERKUBE_ACPI),
+            PR_ASTERKUBE_SETTENANT => Ok(PrctlCmd::PR_ASTERKUBE_SETTENANT(arg2 as u32)),
+            PR_ASTERKUBE_MAC_MODE => Ok(PrctlCmd::PR_ASTERKUBE_MAC_MODE(arg2 as u32)),
+            PR_ASTERKUBE_LABEL_FD => Ok(PrctlCmd::PR_ASTERKUBE_LABEL_FD {
+                fd: arg2 as u32,
+                tenant: arg3 as u32,
+            }),
+            PR_ASTERKUBE_LABEL_IP => Ok(PrctlCmd::PR_ASTERKUBE_LABEL_IP {
+                ipv4: arg2 as u32,
+                tenant: arg3 as u32,
+            }),
             _ => {
                 debug!("prctl cmd number: {}", option);
                 return_errno_with_message!(Errno::EINVAL, "unsupported prctl command");

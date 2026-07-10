@@ -16,7 +16,7 @@ pub trait SocketOption: Any + Send + Sync + Debug {
 
 impl_socket_options!(
     pub struct ReuseAddr(bool);
-    pub struct SocketType(SockType);
+    pub struct SocketType(i32);
     pub struct Error(Option<crate::error::Error>);
     pub struct Broadcast(bool);
     pub struct SendBuf(u32);

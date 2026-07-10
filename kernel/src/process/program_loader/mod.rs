@@ -38,6 +38,7 @@ impl ProgramToLoad {
         path_resolver: &PathResolver,
         mut argv: Vec<CString>,
         envp: Vec<CString>,
+        exec_path: CString,
     ) -> Result<Self> {
         check_executable_inode(elf_file.inode().as_ref())?;
 
@@ -46,6 +47,12 @@ impl ProgramToLoad {
         // If the interpreter is a shebang, then recursion will be triggered. If it loops, we
         // should fail. We follow the same limit as Linux.
         let mut recursive_limit = 5;
+
+        // The path of the file currently being loaded, as it should appear to an
+        // interpreter: a `#!` interpreter receives this as its script argument,
+        // and the script sees it as `$0`. It starts as the path the user passed
+        // to `execve` and becomes each interpreter's path as we recurse.
+        let mut script_path = exec_path;
 
         let (file_first_page, len) = loop {
             // Read the first page of the file, which should contain a shebang or an ELF header.
@@ -64,17 +71,27 @@ impl ProgramToLoad {
             }
             recursive_limit -= 1;
 
+            let interpreter_path = new_argv[0].clone();
             let interpreter = {
-                let filename = new_argv[0].to_str()?.to_string();
+                let filename = interpreter_path.to_str()?.to_string();
                 let fs_path = FsPath::try_from(filename.as_str())?;
                 path_resolver.lookup(&fs_path)?
             };
             check_executable_inode(interpreter.inode().as_ref())?;
 
-            // Update the argument list and the executable inode. Then, try again.
-            new_argv.extend(argv);
+            // Like Linux, replace the original `argv[0]` with the script's path:
+            // the interpreter is invoked as
+            //   [interpreter, optional-interpreter-arg, <script path>, original argv[1..]]
+            // Keeping the original `argv[0]` (e.g. a bare "iptables" from a
+            // PATH-resolved exec) would make the interpreter try to open that
+            // relative name as the script and fail with "cannot open".
+            new_argv.push(script_path);
+            new_argv.extend(argv.into_iter().skip(1));
             argv = new_argv;
             elf_file = interpreter;
+            // For a further (recursive) shebang, the script being interpreted is
+            // now this interpreter.
+            script_path = interpreter_path;
         };
 
         let elf_headers = ElfHeaders::parse(&file_first_page[..len])?;

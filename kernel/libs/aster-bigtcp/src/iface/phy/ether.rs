@@ -57,7 +57,14 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
             interface
         });
 
-        let common = IfaceCommon::new(name, InterfaceType::ETHER, flags, interface, sched_poll);
+        let common = IfaceCommon::new(
+            name,
+            InterfaceType::ETHER,
+            flags,
+            Some(ether_addr.0),
+            interface,
+            sched_poll,
+        );
 
         Arc::new(Self {
             driver,
@@ -262,16 +269,30 @@ impl<D, E: Ext> EtherIface<D, E> {
         tx_token.consume(
             ether_repr.buffer_len() + ip_pkt.ip_repr().buffer_len(),
             |buffer| {
-                let mut frame = EthernetFrame::new_unchecked(buffer);
-                ether_repr.emit(&mut frame);
+                {
+                    let mut frame = EthernetFrame::new_unchecked(&mut *buffer);
+                    ether_repr.emit(&mut frame);
 
-                let ip_repr = ip_pkt.ip_repr();
-                ip_repr.emit(frame.payload_mut(), &caps.checksum);
-                ip_pkt.emit_payload(
-                    &ip_repr,
-                    &mut frame.payload_mut()[ip_repr.header_len()..],
-                    caps,
-                );
+                    let ip_repr = ip_pkt.ip_repr();
+                    ip_repr.emit(frame.payload_mut(), &caps.checksum);
+                    ip_pkt.emit_payload(
+                        &ip_repr,
+                        &mut frame.payload_mut()[ip_repr.header_len()..],
+                        caps,
+                    );
+                }
+
+                // astrokube: DNAT node-originated Service (ClusterIP) traffic on
+                // egress. The buffer now holds the full IP packet with the Service
+                // VIP as its destination; rewrite it to a real backend (the one
+                // kube-proxy programmed) so it is routable off the node, and
+                // record the flow so the reply can be reversed on ingress. A no-op
+                // for ordinary node traffic, so the hot path is unchanged when the
+                // NAT engine is idle.
+                let eth_len = ether_repr.buffer_len();
+                if buffer.len() > eth_len && crate::nat::nat_table().is_active() {
+                    crate::nat::nat_table().apply(&mut buffer[eth_len..]);
+                }
             },
         );
     }

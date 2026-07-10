@@ -44,12 +44,12 @@ const OVERLAY_FS_MAGIC: u64 = 0x794C7630;
 /// upper and lower directories that potentially comes from different
 /// file systems, into a single, unified view at a designated mount point.
 pub struct OverlayFs {
-    /// The writable upper layer.
-    upper: OverlayUpper,
+    /// The writable upper layer. `None` for a read-only, lowerdir-only overlay.
+    upper: Option<OverlayUpper>,
     /// The read-only lower layer.
     lower: OverlayLower,
-    /// The work directory.
-    work: OverlayWork,
+    /// The work directory. `None` when there is no upper layer.
+    work: Option<OverlayWork>,
     /// Configuration settings.
     config: OverlayConfig,
     /// Super block.
@@ -129,12 +129,37 @@ impl OverlayFs {
         Self::validate_work_and_upper(&work, &upper)?;
         Self::validate_work_empty(&work)?;
 
+        Self::new_inner(
+            Some(OverlayUpper { path: upper }),
+            lower,
+            Some(OverlayWork { path: work }),
+        )
+    }
+
+    /// Creates a read-only overlayfs with no upper or work layer (a
+    /// lowerdir-only mount). Writes to the resulting filesystem fail with
+    /// `EROFS`, matching Linux's behavior when `upperdir`/`workdir` are omitted.
+    pub fn new_readonly(lower: Vec<Path>) -> Result<Arc<Self>> {
+        if lower.is_empty() {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "a read-only overlay requires at least one lowerdir"
+            );
+        }
+        Self::new_inner(None, lower, None)
+    }
+
+    fn new_inner(
+        upper: Option<OverlayUpper>,
+        lower: Vec<Path>,
+        work: Option<OverlayWork>,
+    ) -> Result<Arc<Self>> {
         let anon_device_id =
             AnonDeviceId::acquire().expect("no device ID is available for overlayfs");
         Ok(Arc::new_cyclic(|weak| Self {
-            upper: OverlayUpper { path: upper },
+            upper,
             lower: OverlayLower { paths: lower },
-            work: OverlayWork { path: work },
+            work,
             config: OverlayConfig::default(),
             sb: OverlaySB,
             anon_device_id,
@@ -174,15 +199,22 @@ impl FileSystem for OverlayFs {
     /// Utilizes the layered directory entries to build the root inode.
     fn root_inode(&self) -> Arc<dyn Inode> {
         let fs = self.fs();
-        let upper_inode = fs.upper.path.inode().clone();
-        let ino = upper_inode.ino();
+        // With an upper layer the root's identity comes from it; for a read-only
+        // overlay it comes from the top lower layer instead.
+        let (ino, upper_inode) = match fs.upper.as_ref() {
+            Some(upper) => {
+                let inode = upper.path.inode().clone();
+                (inode.ino(), Some(inode))
+            }
+            None => (fs.lower.paths[0].inode().ino(), None),
+        };
         Arc::new_cyclic(|weak| OverlayInode {
             ino,
             type_: InodeType::Dir,
             name_upon_creation: SpinLock::new(String::from("")),
             extension: Extension::new(),
             parent: None,
-            upper: Mutex::new(Some(upper_inode)),
+            upper: Mutex::new(upper_inode),
             upper_is_opaque: false,
             lowers: fs
                 .lower
@@ -805,6 +837,12 @@ impl OverlayInode {
             return Ok(upper.clone());
         }
 
+        // A read-only (lowerdir-only) overlay has no upper layer to copy up
+        // into, so every mutating operation funneling through here fails here.
+        if self.fs.upgrade().unwrap().upper.is_none() {
+            return_errno_with_message!(Errno::EROFS, "overlay filesystem is read-only");
+        }
+
         debug_assert!(self.parent.is_some());
         // FIXME: Should we hold every upper locks from lower to upper
         // for such a long period?
@@ -1237,13 +1275,19 @@ impl FsType for OverlayFsType {
         let fs_ref = thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
 
-        let upper = path_resolver.lookup(&FsPath::try_from(upper)?)?;
         let lower = lower
             .iter()
             .map(|&lower| path_resolver.lookup(&FsPath::try_from(lower)?))
             .collect::<Result<Vec<_>>>()?;
-        let work = path_resolver.lookup(&FsPath::try_from(work)?)?;
 
+        // An overlay with no `upperdir`/`workdir` is a read-only, lowerdir-only
+        // mount (used by container snapshotters for image rootfs views).
+        if upper.is_empty() && work.is_empty() {
+            return Ok(OverlayFs::new_readonly(lower)?);
+        }
+
+        let upper = path_resolver.lookup(&FsPath::try_from(upper)?)?;
+        let work = path_resolver.lookup(&FsPath::try_from(work)?)?;
         Ok(OverlayFs::new(upper, lower, work)?)
     }
 

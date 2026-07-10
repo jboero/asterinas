@@ -155,6 +155,15 @@ impl<'a> RssDelta<'a> {
     fn get(&self, rss_type: RssType) -> isize {
         self.delta[rss_type as usize]
     }
+
+    /// Returns the resident page count of `rss_type` that the operated VMAR
+    /// would have if the currently accumulated delta were applied now (the
+    /// VMAR's committed counter plus this pending delta). Used to enforce cgroup
+    /// `memory.max` before committing a new page.
+    pub(super) fn projected_resident(&self, rss_type: RssType) -> usize {
+        let base = self.operated_vmar.get_rss_counter(rss_type) as isize;
+        (base + self.get(rss_type)).max(0) as usize
+    }
 }
 
 impl Drop for RssDelta<'_> {

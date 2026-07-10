@@ -11,7 +11,7 @@ use ostd::{
 };
 
 use super::{
-    Credentials, Pid, Process, pid_table,
+    Credentials, Pid, Process, Uid, pid_table,
     posix_thread::{AsPosixThread, PosixThreadBuilder},
     rlimit::ResourceLimits,
     signal::{constants::SIGCHLD, sig_disposition::SigDispositions, sig_num::SigNum},
@@ -26,7 +26,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        NsProxy, UserNamespace,
+        NsProxy, PidNamespace, UserNamespace,
         pid_file::PidFile,
         posix_thread::{PosixThread, ThreadLocal, allocate_posix_tid},
         stats::PROCESS_CREATION_COUNTER,
@@ -226,6 +226,15 @@ impl CloneArgs {
                     "`CLONE_THREAD` cannot be used together with `CLONE_PIDFD` or `CLONE_NEWUSER`"
                 );
             }
+
+            // A thread shares its process's PID namespace, so it cannot create a
+            // new one.
+            if clone_flags.contains(CloneFlags::CLONE_NEWPID) {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "`CLONE_THREAD` cannot be used together with `CLONE_NEWPID`"
+                );
+            }
         }
 
         // Reject invalid argument combinations related to the CLONE_SIGHAND flag.
@@ -359,7 +368,12 @@ pub fn clone_child(
             current.children_wait_queue().wait_until(cond);
         }
 
-        let child_pid = child_process.pid();
+        // Return the child's PID as seen from the calling (parent's) PID
+        // namespace, so a process in a nested namespace observes a consistent,
+        // namespace-local PID from `fork`/`clone` and from `getpid`.
+        let child_pid = child_process
+            .pid_nr_in(ctx.process.pid_ns())
+            .unwrap_or_else(|| child_process.pid());
         Ok(child_pid)
     }
 }
@@ -471,6 +485,13 @@ fn clone_child_task(
         thread_builder.build()
     };
 
+    // Inherit the parent thread's seccomp policy (the filters are shared `Arc`s)
+    // and astromac tenant label.
+    if let Some(child_pt) = child_task.as_posix_thread() {
+        child_pt.seccomp().inherit_from(ctx.posix_thread.seccomp());
+        child_pt.set_mac_tenant(ctx.posix_thread.mac_tenant());
+    }
+
     process
         .tasks()
         .lock()
@@ -534,7 +555,7 @@ fn clone_child_process(
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
 
     // Clone the namespaces
-    let child_user_ns = clone_user_ns(clone_flags, thread_local)?;
+    let child_user_ns = clone_user_ns(clone_flags, thread_local, posix_thread.credentials().euid())?;
     let child_ns_proxy = clone_ns_proxy(
         thread_local.borrow_ns_proxy().unwrap(),
         &child_user_ns,
@@ -566,6 +587,29 @@ fn clone_child_process(
     let child_oom_score_adj = process.oom_score_adj().load(Ordering::Relaxed);
 
     let child_tid = allocate_posix_tid();
+
+    // Determine the child's PID namespace and its namespace-local PID (`vpid`).
+    //
+    // - With `CLONE_NEWPID`, the child becomes the `init` (PID 1) of a fresh
+    //   namespace nested under the parent's.
+    // - Otherwise it joins the parent's namespace. In the initial namespace the
+    //   namespace-local PID is just the global PID; in a nested namespace a new
+    //   namespace-local number is allocated.
+    let (child_pid_ns, child_vpid) = if clone_flags.contains(CloneFlags::CLONE_NEWPID) {
+        let new_pid_ns = process
+            .pid_ns()
+            .new_child(child_user_ns.clone(), posix_thread)?;
+        let vpid = new_pid_ns.alloc_local_pid();
+        (new_pid_ns, vpid)
+    } else {
+        let pid_ns = process.pid_ns().clone();
+        let vpid = if pid_ns.is_init() {
+            child_tid
+        } else {
+            pid_ns.alloc_local_pid()
+        };
+        (pid_ns, vpid)
+    };
 
     let child = {
         let child_vmar_arc = child_vmar.clone_arc();
@@ -610,6 +654,8 @@ fn clone_child_process(
 
         create_child_process(
             child_tid,
+            child_pid_ns,
+            child_vpid,
             child_vmar_arc,
             child_resource_limits,
             child_nice,
@@ -619,6 +665,14 @@ fn clone_child_process(
             child_thread_builder,
         )
     };
+
+    // Inherit the parent thread's seccomp policy and astromac tenant label into
+    // the new process's main thread (fork keeps the parent's policy).
+    let child_main = child.main_thread();
+    if let Some(child_pt) = child_main.as_posix_thread() {
+        child_pt.seccomp().inherit_from(ctx.posix_thread.seccomp());
+        child_pt.set_mac_tenant(ctx.posix_thread.mac_tenant());
+    }
 
     clone_pidfd(ctx, &child, clone_flags, clone_args.pidfd)?;
 
@@ -805,12 +859,17 @@ fn clone_pidfd(
 fn clone_user_ns(
     clone_flags: CloneFlags,
     thread_local: &ThreadLocal,
+    owner_uid: Uid,
 ) -> Result<Arc<UserNamespace>> {
     if clone_flags.contains(CloneFlags::CLONE_NEWUSER) {
-        return_errno_with_message!(
-            Errno::EINVAL,
-            "cloning a new user namespace is not supported"
-        );
+        // Create a real child user namespace owned by the caller. Per Linux the
+        // creator would gain a full capability set *within* the new namespace;
+        // astrokube Stage 1 does NOT widen any capability (check_cap is still
+        // global), so this grants no new privilege — it only establishes the
+        // namespace and its parent/owner tracking. ID mapping and ns-aware
+        // capability enforcement are later stages.
+        let parent = thread_local.borrow_user_ns();
+        UserNamespace::new_child(&parent, owner_uid)
     } else {
         Ok(thread_local.borrow_user_ns().clone())
     }
@@ -829,6 +888,8 @@ fn clone_ns_proxy(
 #[expect(clippy::too_many_arguments)]
 fn create_child_process(
     pid: Pid,
+    pid_ns: Arc<PidNamespace>,
+    vpid: Pid,
     vmar: Arc<Vmar>,
     resource_limits: ResourceLimits,
     nice: Nice,
@@ -839,6 +900,8 @@ fn create_child_process(
 ) -> Arc<Process> {
     let child_proc = Process::new(
         pid,
+        pid_ns,
+        vpid,
         vmar,
         resource_limits,
         nice,

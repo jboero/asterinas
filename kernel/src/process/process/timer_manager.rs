@@ -11,7 +11,7 @@ use ostd::{cpu::PrivilegeLevel, irq::InterruptLevel, sync::Mutex, timer};
 
 use super::Process;
 use crate::{
-    fs::cgroupfs::{CpuStatKind, charge_cpu_time},
+    fs::cgroupfs::{CpuStatKind, charge_cpu_bandwidth, charge_cpu_time},
     process::{
         posix_thread::AsPosixThread,
         signal::{constants::SIGALRM, signals::kernel::KernelSignal},
@@ -75,6 +75,14 @@ fn update_cpu_time() {
             .timer_manager()
             .process_expired_timers();
     }
+
+    // Charge this tick against the process's cgroup `cpu.max` bandwidth budget.
+    // The actual throttling happens before re-entering user space (see the task
+    // run loop), where the thread can safely block.
+    charge_cpu_bandwidth(
+        &process,
+        timer::Jiffies::new(1).as_duration().as_micros() as u64,
+    );
     timer_manager
         .prof_timer()
         .timer_manager()

@@ -12,7 +12,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        Credentials, ProcessVm, UserNamespace, pid_table,
+        Credentials, PidNamespace, ProcessVm, UserNamespace, pid_table,
         posix_thread::{PosixThreadBuilder, ThreadName, allocate_posix_tid},
         program_loader::ProgramToLoad,
         rlimit::new_resource_limits_for_init,
@@ -101,8 +101,13 @@ fn create_init_process(
     let oom_score_adj = 0;
     let sig_dispositions = Arc::new(Mutex::new(SigDispositions::default()));
     let user_ns = UserNamespace::get_init_singleton().clone();
+    let pid_ns = PidNamespace::get_init_singleton().clone();
 
+    // The init process lives in the initial PID namespace, where its
+    // namespace-local PID equals its global PID.
     let init_proc = Process::new(
+        pid,
+        pid_ns,
         pid,
         vmar.clone_arc(),
         resource_limits,
@@ -147,11 +152,13 @@ fn create_init_task(
     let (elf_load_info, elf_abs_path) = {
         let path_resolver = fs.resolver().read();
 
+        let elf_abs_path = path_resolver.make_abs_path(&elf_path).into_string();
+        let exec_path = CString::new(elf_abs_path.clone())
+            .map_err(|_| Error::with_message(Errno::EINVAL, "the init path is invalid"))?;
         let program_to_load =
-            ProgramToLoad::build_from_file(elf_path.clone(), &path_resolver, argv, envp)?;
+            ProgramToLoad::build_from_file(elf_path.clone(), &path_resolver, argv, envp, exec_path)?;
         let vmar = process.lock_vmar();
         let elf_load_info = program_to_load.load_to_vmar(vmar.unwrap(), &path_resolver)?;
-        let elf_abs_path = path_resolver.make_abs_path(&elf_path).into_string();
 
         (elf_load_info, elf_abs_path)
     };

@@ -5,7 +5,9 @@ use core::ffi::CStr;
 
 use smoltcp::wire::{Ipv4Address, Ipv4Cidr, Ipv6Address};
 
-use super::{BindPortConfig, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceType};
+use super::{
+    BindPortConfig, BoundIcmpPort, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceType,
+};
 use crate::{errors::BindError, ext::Ext};
 
 /// A network interface.
@@ -51,6 +53,16 @@ impl<E: Ext> dyn Iface<E> {
         common.bind_udp(self.clone(), config)
     }
 
+    /// Binds an ICMP echo identifier to the iface. The "port" in the config is
+    /// the identifier; an ephemeral one is picked if unspecified.
+    pub fn bind_icmp(
+        self: &Arc<Self>,
+        config: BindPortConfig,
+    ) -> Result<BoundIcmpPort<E>, BindError> {
+        let common = self.common();
+        common.bind_icmp(self.clone(), config)
+    }
+
     /// Returns the interface index.
     pub fn index(&self) -> u32 {
         self.common().index()
@@ -80,6 +92,12 @@ impl<E: Ext> dyn Iface<E> {
         self.common().ipv4_addr()
     }
 
+    /// Gets the L2 (MAC) hardware address of the iface, if it has one (Ethernet
+    /// interfaces do; loopback does not).
+    pub fn mac(&self) -> Option<[u8; 6]> {
+        self.common().mac()
+    }
+
     /// Gets the IPv6 address of the iface, if any.
     pub fn ipv6_addr(&self) -> Option<Ipv6Address> {
         self.common().ipv6_addr()
@@ -91,6 +109,25 @@ impl<E: Ext> dyn Iface<E> {
     /// or both will return `None`.
     pub fn prefix_len(&self) -> Option<u8> {
         self.common().prefix_len()
+    }
+
+    /// Sets the interface's IPv4 address and on-link subnet to `cidr`,
+    /// replacing any existing IPv4 address. This is the kernel side of
+    /// assigning an address with `RTM_NEWADDR`.
+    pub fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
+        self.common().set_ipv4_cidr(cidr)
+    }
+
+    /// Returns the IPv4 default-route gateway, if one is configured
+    /// (e.g. for the virtio interface). Used to report routes via netlink.
+    pub fn ipv4_gateway(&self) -> Option<Ipv4Address> {
+        self.common().ipv4_gateway()
+    }
+
+    /// Adds an IPv4 route via `gateway` (prefix length 0 = default route).
+    /// This is the kernel side of programming a route with `RTM_NEWROUTE`.
+    pub fn add_ipv4_route(&self, cidr: Ipv4Cidr, gateway: Ipv4Address) {
+        self.common().add_ipv4_route(cidr, gateway)
     }
 
     /// Gets the broadcast address of the iface, if any.

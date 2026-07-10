@@ -413,11 +413,15 @@ impl PathResolver {
                 "`new_root` or the current root is not a mount point"
             );
         }
-        if new_root_path.mount.parent().is_none() || self.root.mount.parent().is_none() {
-            return_errno_with_message!(
-                Errno::EINVAL,
-                "`new_root` or the current root is on the rootfs mount"
-            );
+        // `new_root` must be an attached mount (it must have a parent). The
+        // current root, however, need NOT have a parent: it is permitted (and
+        // common) for it to be the bare mount-namespace root. This is the idiom
+        // `runc` uses — `pivot_root(".", ".")` from a freshly-unshared mount
+        // namespace whose root has no parent — and Linux allows it (only
+        // `new_root` is required to be attached). When the old root has no
+        // parent, `new_root` simply becomes the new namespace root below.
+        if new_root_path.mount.parent().is_none() {
+            return_errno_with_message!(Errno::EINVAL, "`new_root` is on the rootfs mount");
         }
         let mut topology_guard = MountTopology::write_lock();
 
@@ -434,18 +438,32 @@ impl PathResolver {
             );
         }
 
-        let parent_path = {
-            let parent_mount = self.root.mount.parent().unwrap().upgrade().unwrap();
+        // Record where the old root is attached *before* moving it, since
+        // grafting clears its mountpoint. If the old root is the namespace root
+        // it has no parent, and `new_root` will take its place as the (also
+        // parentless) namespace root.
+        let old_root_parent_path = self.root.mount.parent().map(|parent| {
+            let parent_mount = parent.upgrade().unwrap();
             let mountpoint = self.root.mount.mountpoint().unwrap();
             Path::new(parent_mount, mountpoint)
-        };
+        });
 
+        // Move the old root onto `put_old`.
         self.root
             .mount
             .graft_mount_tree(&put_old_path, &mut topology_guard);
-        new_root_path
-            .mount
-            .graft_mount_tree(&parent_path, &mut topology_guard);
+        // Put `new_root` where the old root used to be.
+        match old_root_parent_path {
+            Some(parent_path) => new_root_path
+                .mount
+                .graft_mount_tree(&parent_path, &mut topology_guard),
+            None => {
+                // The old root was the namespace root, so `new_root` becomes
+                // the new parentless namespace root.
+                new_root_path.mount.detach_from_parent(&mut topology_guard);
+                new_root_path.mount.set_parent(None);
+            }
+        }
 
         // Release the mount topology lock before taking other threads' resolver locks.
         drop(topology_guard);

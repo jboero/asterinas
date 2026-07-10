@@ -2,7 +2,10 @@
 
 use super::super::{
     LsmFlags, LsmModule,
-    hooks::{AlienAccessContext, CapableContext, LsmAlienAccessHook, LsmCapabilityHook},
+    hooks::{
+        AlienAccessContext, CapableContext, LsmAlienAccessHook, LsmCapabilityHook,
+        LsmFileAccessHook, LsmSignalAccessHook, LsmSocketConnectHook,
+    },
 };
 use crate::{
     prelude::*,
@@ -81,3 +84,9 @@ impl LsmAlienAccessHook for CapabilityLsm {
         );
     }
 }
+
+// The capability module does not participate in astromac's tenant hooks; the
+// default (permit) implementations apply.
+impl LsmSignalAccessHook for CapabilityLsm {}
+impl LsmFileAccessHook for CapabilityLsm {}
+impl LsmSocketConnectHook for CapabilityLsm {}

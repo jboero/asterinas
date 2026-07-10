@@ -554,6 +554,30 @@ pub trait Inode: Any + FileOps + Send + Sync {
     /// Similar to Linux, using "fsuid" here allows setting filesystem permissions
     /// without changing the "normal" uids for other tasks.
     fn check_permission(&self, mut perm: Permission) -> Result<()> {
+        // astromac MAC (mandatory): a tenant-labeled subject accessing a file
+        // labeled for a different tenant may be denied regardless of the
+        // discretionary checks below. The fast path is a single atomic load —
+        // skipped entirely unless some file is labeled — and it never affects
+        // unconfined (tenant 0) subjects, i.e. every process on an unmodified
+        // node. This is checked first so MAC can override DAC, as a mandatory
+        // policy must.
+        if crate::security::lsm::astromac::has_file_labels()
+            && let Some(task) = Task::current()
+            && let Some(thread) = task.as_posix_thread()
+        {
+            let subject_tenant = thread.mac_tenant();
+            if subject_tenant != 0 {
+                let md = self.metadata();
+                crate::security::lsm::hooks::on_file_access(
+                    &crate::security::lsm::hooks::FileAccessContext::new(
+                        subject_tenant,
+                        md.container_dev_id.as_encoded_u64(),
+                        md.ino,
+                    ),
+                )?;
+            }
+        }
+
         let Some(task) = Task::current() else {
             return Ok(());
         };
@@ -570,9 +594,14 @@ pub trait Inode: Any + FileOps + Send + Sync {
             // Read/write DACs are always overridable.
             perm -= Permission::MAY_READ | Permission::MAY_WRITE;
 
-            // Executable DACs are overridable when there is at least one exec bit set.
+            // Execute DACs are overridable for directories (i.e. search
+            // permission is always granted), and for non-directories only when
+            // at least one execute bit is set. This matches Linux, where
+            // CAP_DAC_OVERRIDE always permits directory search but still
+            // requires an execute bit to run a regular file.
             if perm.may_exec() {
-                if mode.is_owner_executable()
+                if metadata.type_ == InodeType::Dir
+                    || mode.is_owner_executable()
                     || mode.is_group_executable()
                     || mode.is_other_executable()
                 {
