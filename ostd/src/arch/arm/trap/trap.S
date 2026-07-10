@@ -140,8 +140,12 @@ vec_undef:
 // fsr, far) with `lr` (already adjusted) as the faulting/return PC and `spsr`
 // as the saved CPSR. `r13`/`r14` are approximated (the banked kernel values are
 // not needed for page-fault recovery or panic reporting).
+// The frame is padded to 20 words (80 bytes, an 8-byte multiple) rather than
+// the 19 words of actual data so that `sp` stays 8-byte aligned across the
+// `bl` to the Rust handler, as AAPCS requires (a 76-byte frame would leave
+// `sp` 4-aligned and misalign any 8-byte-aligned stack locals in the handler).
 .macro BUILD_KERNEL_FRAME
-    sub     sp, sp, #(19 * 4)
+    sub     sp, sp, #(20 * 4)
     stmia   sp, {{r0-r12}}          // r0-r12 -> [sp+0 .. sp+48]
     mov     r0, #0
     str     r0, [sp, #(13 * 4)]     // r13 (approx)
@@ -156,7 +160,7 @@ vec_undef:
 .macro RET_KERNEL_FRAME
     ldr     lr, [sp, #(15 * 4)]
     ldmia   sp, {{r0-r12}}
-    add     sp, sp, #(19 * 4)
+    add     sp, sp, #(20 * 4)
     movs    pc, lr
 .endm
 
@@ -170,25 +174,41 @@ vec_undef:
 kernel_irq_entry:
     srsdb   sp!, #0x13              // IRQ -> SVC stack: push lr(PC) and spsr(CPSR)
     cps     #0x13                   // switch to SVC mode (interrupted kernel stack)
-    sub     sp, sp, #(19 * 4)       // reserve a TrapFrame below the srs record
+    // Reserve a 20-word (80-byte) TrapFrame below the srs record. 80 is an
+    // 8-byte multiple, so `sp` stays 8-aligned across `bl irq_handler` as AAPCS
+    // requires; a 19-word (76-byte) frame would leave `sp` 4-aligned and
+    // misalign 8-byte-aligned stack locals (e.g. a scheduler wake enqueuing
+    // into a `BinaryHeap` on a timer IRQ).
+    sub     sp, sp, #(20 * 4)       // reserve a TrapFrame below the srs record
     stmia   sp, {{r0-r12}}          // r0-r12 (r0 preserved by CHECK_FROM_USER)
-    add     r0, sp, #(19 * 4 + 8)   // interrupted SVC sp (frame + srs record)
+    add     r0, sp, #(20 * 4 + 8)   // interrupted SVC sp (frame + srs record)
     str     r0, [sp, #(13 * 4)]     // r13
     str     lr, [sp, #(14 * 4)]     // r14 (SVC-banked, untouched by IRQ mode)
-    ldr     r0, [sp, #(19 * 4)]     // PC from the srs record
+    ldr     r0, [sp, #(20 * 4)]     // PC from the srs record
     str     r0, [sp, #(15 * 4)]
-    ldr     r0, [sp, #(19 * 4 + 4)] // CPSR from the srs record
+    ldr     r0, [sp, #(20 * 4 + 4)] // CPSR from the srs record
     str     r0, [sp, #(16 * 4)]
     mov     r0, #0
     str     r0, [sp, #(17 * 4)]     // fsr = 0
     str     r0, [sp, #(18 * 4)]     // far = 0
-    mov     r0, sp
+    // The interrupted SVC `sp` may itself be only 4-byte aligned: AAPCS permits
+    // a function to hold `sp` at 4-byte alignment between calls, and an IRQ can
+    // be taken at any such point. A multiple-of-8 frame size preserves whatever
+    // (mis)alignment the interrupt found, so we must *force* 8-byte alignment of
+    // `sp` before calling the handler, or its 8-byte-aligned stack locals break.
+    // The frame base is kept in the callee-saved r4 (preserved across `bl`) so
+    // it can be recovered afterwards.
+    mov     r4, sp                  // r4 = frame base (survives the call)
+    mov     r0, sp                  // r0 = &TrapFrame (4-byte alignment suffices)
+    bic     sp, sp, #7              // force 8-byte stack alignment for the call
     bl      irq_handler
+    mov     sp, r4                  // recover the frame base
     // Restore the interrupted r14 (SVC lr), which `bl` clobbered; rfe restores
-    // PC/CPSR and the stack unwinding restores r13. r0-r12 come from the frame.
+    // PC/CPSR and the stack unwinding restores r13. r0-r12 come from the frame
+    // (`ldmia` also restores the interrupted r4 that we borrowed above).
     ldr     lr, [sp, #(14 * 4)]
     ldmia   sp, {{r0-r12}}          // restore r0-r12
-    add     sp, sp, #(19 * 4)       // pop the TrapFrame -> sp at srs record
+    add     sp, sp, #(20 * 4)       // pop the TrapFrame -> sp at srs record
     rfeia   sp!                     // return: load PC/CPSR and resume
 
 kernel_abort_entry_data:

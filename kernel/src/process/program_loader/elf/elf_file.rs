@@ -6,6 +6,10 @@ use xmas_elf::{
     header::{self, Header, HeaderPt1, HeaderPt2, HeaderPt2_, Machine_, Type_},
     program::{self, ProgramHeader64},
 };
+// On 32-bit ARM the init ELF uses 32-bit program headers, which we widen to the
+// 64-bit representation the rest of this loader operates on.
+#[cfg(target_arch = "arm")]
+use xmas_elf::program::ProgramHeader32;
 
 use crate::{
     fs::{utils::PATH_MAX, vfs::inode::Inode},
@@ -41,7 +45,11 @@ impl ElfHeaders {
         let ph_count = elf_header.pt2.ph_count;
         let ph_entry_size = elf_header.pt2.ph_entry_size;
         let ph_offset = elf_header.pt2.ph_offset;
-        if ph_entry_size as usize != size_of::<ProgramHeader64>() {
+        #[cfg(not(target_arch = "arm"))]
+        let expected_ph_entry_size = size_of::<ProgramHeader64>();
+        #[cfg(target_arch = "arm")]
+        let expected_ph_entry_size = size_of::<ProgramHeader32>();
+        if ph_entry_size as usize != expected_ph_entry_size {
             return_errno_with_message!(
                 Errno::ENOEXEC,
                 "the size of ELF program headers is invalid"
@@ -70,6 +78,20 @@ impl ElfHeaders {
                 })?;
             let ph64 = match program_header {
                 program::ProgramHeader::Ph64(ph64) => *ph64,
+                // Widen a 32-bit program header (as produced for the ARMv7 init
+                // ELF) into the 64-bit form the rest of the loader uses.
+                #[cfg(target_arch = "arm")]
+                program::ProgramHeader::Ph32(ph32) => ProgramHeader64 {
+                    type_: ph32.type_,
+                    flags: ph32.flags,
+                    offset: ph32.offset as u64,
+                    virtual_addr: ph32.virtual_addr as u64,
+                    physical_addr: ph32.physical_addr as u64,
+                    file_size: ph32.file_size as u64,
+                    mem_size: ph32.mem_size as u64,
+                    align: ph32.align as u64,
+                },
+                #[cfg(not(target_arch = "arm"))]
                 program::ProgramHeader::Ph32(_) => {
                     return_errno_with_message!(
                         Errno::ENOEXEC,
@@ -219,6 +241,42 @@ impl ElfHeader {
                     sh_str_index: *sh_str_index,
                 }
             }
+            // The ARMv7 init ELF has a 32-bit header; widen it to the 64-bit
+            // representation (`HeaderPt2_64`) the loader operates on.
+            #[cfg(target_arch = "arm")]
+            HeaderPt2::Header32(header_pt2) => {
+                let HeaderPt2_ {
+                    type_,
+                    machine,
+                    version,
+                    entry_point,
+                    ph_offset,
+                    sh_offset,
+                    flags,
+                    header_size,
+                    ph_entry_size,
+                    ph_count,
+                    sh_entry_size,
+                    sh_count,
+                    sh_str_index,
+                } = header_pt2;
+                HeaderPt2_64 {
+                    type_: *type_,
+                    machine: *machine,
+                    version: *version,
+                    entry_point: *entry_point as u64,
+                    ph_offset: *ph_offset as u64,
+                    sh_offset: *sh_offset as u64,
+                    flags: *flags,
+                    header_size: *header_size,
+                    ph_entry_size: *ph_entry_size,
+                    ph_count: *ph_count,
+                    sh_entry_size: *sh_entry_size,
+                    sh_count: *sh_count,
+                    sh_str_index: *sh_str_index,
+                }
+            }
+            #[cfg(not(target_arch = "arm"))]
             _ => return_errno_with_message!(Errno::ENOEXEC, "the ELF file is not 64-bit"),
         };
         Ok(ElfHeader { pt1, pt2 })

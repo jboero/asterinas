@@ -33,10 +33,26 @@ pub struct GeneralRegs {
 /// Userspace CPU context, including general-purpose registers and exception
 /// information.
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct UserContext {
     user_context: RawUserContext,
     exception: Option<CpuException>,
+}
+
+impl Default for UserContext {
+    fn default() -> Self {
+        let mut user_context = RawUserContext::default();
+        // A fresh user thread must start in USR mode (`CPSR.M = 0b10000`),
+        // otherwise `run_user`'s `movs pc, lr` would drop into the zero mode
+        // and execute user code at PL1, where the user pages' PXN bit forbids
+        // instruction fetch (an endless prefetch abort). ARM state (T=0), with
+        // IRQs and FIQs unmasked so the thread can be preempted.
+        user_context.cpsr = 0x0000_0010;
+        Self {
+            user_context,
+            exception: None,
+        }
+    }
 }
 
 /// ARMv7-A CPU exceptions.
