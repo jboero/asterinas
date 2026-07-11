@@ -37,6 +37,7 @@ members = [
     "kernel/comps/logger",
     "kernel/comps/mlsdisk",
     "kernel/comps/network",
+    "kernel/comps/nvidia",
     "kernel/comps/nvme",
     "kernel/comps/pci",
     "kernel/comps/softirq",
@@ -84,6 +85,7 @@ default-members = [
     "kernel/comps/logger",
     "kernel/comps/mlsdisk",
     "kernel/comps/network",
+    "kernel/comps/nvidia",
     "kernel/comps/nvme",
     "kernel/comps/pci",
     "kernel/comps/softirq",
@@ -157,6 +159,7 @@ aster-input = { path = "kernel/comps/input" }
 aster-logger = { path = "kernel/comps/logger" }
 aster-mlsdisk = { path = "kernel/comps/mlsdisk" }
 aster-network = { path = "kernel/comps/network" }
+aster-nvidia = { path = "kernel/comps/nvidia" }
 aster-nvme = { path = "kernel/comps/nvme" }
 aster-pci = { path = "kernel/comps/pci" }
 aster-softirq = { path = "kernel/comps/softirq" }
