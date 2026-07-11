@@ -220,9 +220,13 @@ struct Vdso {
 // Asterinas can implement vDSO library independently.
 // As long as our vDSO provides the same symbols as Linux does,
 // the libc will work just fine.
+// The x86-64 vDSO is vendored in-tree on this fork (the layout-matched copy from
+// asterinas/linux_vdso). Supplying the host's raw `[vdso]` dump via
+// `VDSO_LIBRARY_DIR` instead has the wrong text/data segment offsets and
+// livelocks Go at startup (`__vdso_*` call lands on a read-only page), so we pin
+// the correct binary rather than depend on an env var. See `astrokube/POC-STATUS.md`.
 #[cfg(target_arch = "x86_64")]
-const PREBUILT_VDSO_LIB: &[u8] =
-    include_bytes!(concat!(env!("VDSO_LIBRARY_DIR"), "/vdso_x86_64.so"));
+const PREBUILT_VDSO_LIB: &[u8] = include_bytes!("vdso_x86_64.so");
 #[cfg(target_arch = "riscv64")]
 const PREBUILT_VDSO_LIB: &[u8] =
     include_bytes!(concat!(env!("VDSO_LIBRARY_DIR"), "/vdso_riscv64.so"));
