@@ -77,6 +77,21 @@ issues), **Track 2** (CGO-free CUDA userspace).
   gsp_ga10x ELF/container layout, (c) move `gsp::boot()` out of probe into a
   deferred entry point.
 
+- **P1.3 (reset/control) — DONE, verified on A5000.** `gsp::reset()` performs the
+  GA10x falcon reset (`kflcnResetIntoRiscv_GA102` steps 1–3): pre-reset wait on
+  `HWCFG2.RESET_READY` (bit 31), toggle `NV_PGSP_FALCON_ENGINE.RESET` (0x1103c0
+  bit 0) with the 10-read-back propagation delay, poll `DMACTL` (bits 1,2) for
+  scrub-done. Real-HW finding: after reset the **Falcon front-end PRI-locks**
+  (`CPUCTL/DMACTL = 0xbadf5620`, the `0xbadf____` lockdown sentinel) as the core
+  drops into RISC-V mode — expected GA10x behavior; the RISC-V window stays live
+  (`RISCV_CPUCTL=0x10`, halted). `reset_ready` never sets (HW erratum, non-fatal,
+  matches the RM). Container test still passes after reset (GPU undisturbed).
+  The BROM kick (`BCR_CTRL=0x111`) is deferred to P1.5 (needs firmware in WPR).
+  Register bitfields cited in `gsp.rs`.
+
+  *Milestone renumber:* remaining steps are P1.4 firmware delivery + ELF parse,
+  P1.5 WPR2 + firmware DMA, P1.6 RPC msgqueue, P1.7 BROM kick + `GSP_INIT_DONE`.
+
 ## Test rig
 
 The A5000 (Ampere/GSP) on the Precision laptop is the P1 dev target (display on

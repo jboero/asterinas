@@ -60,6 +60,16 @@ pub fn init() {
                 } else {
                     info!("nvidia:   GSP core: register block not reachable (BAR0 unavailable)");
                 }
+                if let Some(rst) = r.gsp_reset {
+                    info!(
+                        "nvidia:   GSP reset (P1.3): reset_ready={} scrub_done={} falcon_pri_locked={} (0xbadf = reset-into-RISC-V, expected)",
+                        rst.reset_ready_seen, rst.scrub_done, rst.falcon_pri_locked,
+                    );
+                    info!(
+                        "nvidia:   GSP post-reset: CPUCTL={:#010x} DMACTL={:#010x} RISCV_CPUCTL={:#010x}",
+                        rst.post_cpuctl, rst.post_dmactl, rst.post_riscv_cpuctl,
+                    );
+                }
             } else {
                 info!("nvidia:   pre-GSP architecture → enumerated + identified, but not drivable by nvidia-open");
             }

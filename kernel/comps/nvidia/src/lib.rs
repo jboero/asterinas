@@ -42,7 +42,7 @@ use component::{ComponentInitError, init_component};
 use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
-pub use crate::gsp::GspCoreState;
+pub use crate::gsp::{GspCoreState, GspResetOutcome};
 
 mod chip;
 mod gsp;
@@ -113,9 +113,17 @@ impl PciDriver for NvidiaGpuDriver {
         };
         let gsp_capable = chip.architecture.is_gsp_capable();
         // P1.1: for GSP-capable chips, read the GSP microprocessor state (falcon /
-        // RISC-V core, over BAR0). Read-only; the boot sequence comes next.
+        // RISC-V core, over BAR0).
         let gsp_state = if gsp_capable {
             reg_io.as_ref().and_then(gsp::probe_state)
+        } else {
+            None
+        };
+        // P1.3: reset the GSP falcon core (the first write-path control of the
+        // GSP) and confirm it re-scrubs into a clean pre-boot state. Does not
+        // boot it; independent of the BAR1 VRAM path used below.
+        let gsp_reset = if gsp_capable {
+            reg_io.as_ref().and_then(gsp::reset)
         } else {
             None
         };
@@ -148,6 +156,7 @@ impl PciDriver for NvidiaGpuDriver {
             msix_vectors,
             vram_rw,
             gsp_state,
+            gsp_reset,
         });
 
         // Crate-local logs (silent on x86; kept for when that's fixed / other archs).
@@ -258,6 +267,8 @@ pub struct GpuReport {
     /// GSP microprocessor state read over BAR0 (P1.1). `Some` for GSP-capable
     /// chips where the register block was reachable; `None` otherwise.
     pub gsp_state: Option<GspCoreState>,
+    /// Outcome of the GSP falcon reset (P1.3). `Some` for GSP-capable chips.
+    pub gsp_reset: Option<GspResetOutcome>,
 }
 
 static REPORT: Mutex<Option<GpuReport>> = Mutex::new(None);

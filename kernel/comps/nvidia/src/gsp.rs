@@ -40,11 +40,38 @@ const FALCON_CPUCTL: usize = NV_PGSP + 0x100;
 /// HW config — IMEM size in `[8:0]`, DMEM size in `[17:9]`, each in 256-byte blocks.
 const FALCON_HWCFG: usize = NV_PGSP + 0x108;
 
+/// Falcon engine reset (`NV_PGSP_FALCON_ENGINE`): bit 0 `_RESET` (1=assert).
+const FALCON_ENGINE: usize = NV_PGSP + 0x3c0;
+/// DMA control — bit 1 `DMEM_SCRUBBING`, bit 2 `IMEM_SCRUBBING`; both 0 = done.
+/// This is what the RM polls to know a falcon reset finished (not HWCFG2).
+const FALCON_DMACTL: usize = NV_PGSP + 0x10c;
+
 // --- Peregrine RISC-V registers (offsets from NV_PRISCV) ---
-/// RISC-V core control (start/halt/active state).
+/// RISC-V core control — bit 7 `ACTIVE_STAT` (1=running), bit 4 `HALTED`.
 const RISCV_CPUCTL: usize = NV_PRISCV + 0x388;
-/// Boot-config control — written to kick the RISC-V core into secure/BROM boot.
+/// Boot-config control — written `0x111` (CORE_SELECT_RISCV | VALID | BRFETCH)
+/// to kick the RISC-V core into secure/BROM boot; bit 0 `VALID` is RO status.
 const RISCV_BCR_CTRL: usize = NV_PRISCV + 0x668;
+
+/// `NV_PGSP_FALCON_ENGINE_RESET` — assert-reset bit.
+const ENGINE_RESET: u32 = 1 << 0;
+/// `NV_PFALCON_FALCON_HWCFG2_RESET_READY` (bit 31) — 1 = ready for reset.
+const HWCFG2_RESET_READY: u32 = 1 << 31;
+/// DMACTL IMEM+DMEM scrubbing mask (bits 1,2); == 0 means scrub done.
+const DMACTL_SCRUB_MASK: u32 = 0x6;
+/// Number of ENGINE read-backs used as the reset propagation delay
+/// (`FLCN_RESET_PROPAGATION_DELAY_COUNT`).
+const RESET_PROPAGATION_READS: usize = 10;
+/// PRI priv-lockdown sentinel: a register read of `0xbadf_____` (high 16 bits ==
+/// `0xbadf`) means the register is locked / access-denied rather than real data.
+/// GA10x locks the Falcon front-end PRI after reset-into-RISC-V.
+const PRI_LOCKDOWN_MASK: u32 = 0xffff_0000;
+const PRI_LOCKDOWN_VALUE: u32 = 0xbadf_0000;
+
+/// True if a register read is the `0xbadf____` priv-lockdown sentinel.
+fn is_pri_locked(v: u32) -> bool {
+    v & PRI_LOCKDOWN_MASK == PRI_LOCKDOWN_VALUE
+}
 
 /// GFW (GPU firmware / devinit) boot-progress scratch. Boot is complete when the
 /// low byte reads `0xff` (`GFW_BOOT_PROGRESS_COMPLETED`). Must be waited on
@@ -140,6 +167,85 @@ pub(crate) fn probe_state(regs: &IoMem) -> Option<GspCoreState> {
         mailbox1,
         falcon_os,
         irqstat,
+    })
+}
+
+/// Outcome of a GSP falcon reset (**P1.3** — the first *control* of the GSP core).
+#[derive(Debug, Clone, Copy)]
+pub struct GspResetOutcome {
+    /// `HWCFG2.RESET_READY` (bit 31) was observed set during the pre-reset wait.
+    pub reset_ready_seen: bool,
+    /// After reset, DMACTL IMEM+DMEM scrubbing completed (bits 1,2 == 0) — the
+    /// RM's actual "reset finished, core ready" condition. Only meaningful when
+    /// `falcon_pri_locked` is false.
+    pub scrub_done: bool,
+    /// After reset the Falcon front-end PRI read back the `0xbadf____` lockdown
+    /// sentinel — the expected GA10x "reset into RISC-V mode" state (the boot
+    /// then proceeds via SEC2 + the RISC-V window, not this locked front-end).
+    pub falcon_pri_locked: bool,
+    /// Post-reset `FALCON_CPUCTL` (`0xbadf____` if the front-end locked).
+    pub post_cpuctl: u32,
+    /// Post-reset `FALCON_DMACTL`.
+    pub post_dmactl: u32,
+    /// Post-reset `RISCV_CPUCTL` (expect not-ACTIVE).
+    pub post_riscv_cpuctl: u32,
+}
+
+/// Reset the GSP falcon core into a clean pre-boot state — the first *write*-path
+/// control of the GSP. Mirrors `kflcnResetIntoRiscv_GA102` steps 1–3 for GA10x:
+/// pre-reset wait on `HWCFG2.RESET_READY`, toggle `NV_PGSP_FALCON_ENGINE.RESET`
+/// with the 10-read-back propagation delay, then poll `DMACTL` scrubbing done.
+///
+/// It deliberately does **not** arm the RISC-V BROM (`BCR_CTRL`) — that starts a
+/// boot, which needs the firmware staged in WPR2 (P1.5). Safe here: the GSP is
+/// halted and running nothing. Timeouts are bounded read-loops (the RM's
+/// RESET_READY timeout is itself non-fatal).
+pub(crate) fn reset(regs: &IoMem) -> Option<GspResetOutcome> {
+    // 1. Pre-reset wait: HWCFG2.RESET_READY (bit 31) -> 1. Non-fatal if it never
+    //    sets (HW erratum; the RM proceeds regardless).
+    let mut reset_ready_seen = false;
+    for _ in 0..100_000 {
+        if regs.read_once::<u32>(FALCON_HWCFG2).ok()? & HWCFG2_RESET_READY != 0 {
+            reset_ready_seen = true;
+            break;
+        }
+    }
+
+    // 2. Falcon engine reset: RESET=1, 10 ENGINE read-backs (propagation delay),
+    //    RESET=0, 10 read-backs.
+    regs.write_once(FALCON_ENGINE, &ENGINE_RESET).ok()?;
+    for _ in 0..RESET_PROPAGATION_READS {
+        regs.read_once::<u32>(FALCON_ENGINE).ok()?;
+    }
+    regs.write_once(FALCON_ENGINE, &0u32).ok()?;
+    for _ in 0..RESET_PROPAGATION_READS {
+        regs.read_once::<u32>(FALCON_ENGINE).ok()?;
+    }
+
+    // 3. Wait for reset to finish: DMACTL IMEM/DMEM scrubbing done (bits 1,2 == 0).
+    //    On GA10x the Falcon front-end may PRI-lock (0xbadf sentinel) as it drops
+    //    into RISC-V mode — detect that rather than misreading it as scrub-done.
+    let mut scrub_done = false;
+    let mut falcon_pri_locked = false;
+    for _ in 0..1_000_000 {
+        let dmactl = regs.read_once::<u32>(FALCON_DMACTL).ok()?;
+        if is_pri_locked(dmactl) {
+            falcon_pri_locked = true;
+            break;
+        }
+        if dmactl & DMACTL_SCRUB_MASK == 0 {
+            scrub_done = true;
+            break;
+        }
+    }
+
+    Some(GspResetOutcome {
+        reset_ready_seen,
+        scrub_done,
+        falcon_pri_locked,
+        post_cpuctl: regs.read_once::<u32>(FALCON_CPUCTL).ok()?,
+        post_dmactl: regs.read_once::<u32>(FALCON_DMACTL).ok()?,
+        post_riscv_cpuctl: regs.read_once::<u32>(RISCV_CPUCTL).ok()?,
     })
 }
 
