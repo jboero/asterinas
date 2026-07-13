@@ -199,6 +199,21 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                 fw.image.map(|s| s.size).unwrap_or(0),
                 fw.version_str(blob),
             );
+            // P1.5a: stage the .fwimage into GPU-DMA-able sysmem.
+            if let Some(img) = fw.image {
+                if let Some(image) = blob.get(img.offset..img.offset + img.size) {
+                    match aster_nvidia::stage_firmware(image) {
+                        Some(s) => info!(
+                            "nvidia:   .fwimage staged for DMA (P1.5a): {} bytes at GPU-phys {:#x}, verified={}",
+                            s.bytes, s.daddr, s.verified,
+                        ),
+                        None => info!(
+                            "nvidia:   .fwimage DMA staging failed ({} bytes — contiguous alloc; radix3 scatter is P1.5b)",
+                            img.size,
+                        ),
+                    }
+                }
+            }
         }
         None => info!(
             "nvidia: GSP firmware {} present ({} bytes) but not a valid ELF container",

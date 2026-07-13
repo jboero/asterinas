@@ -43,7 +43,7 @@ use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
 pub use crate::fw::FwContainer;
-pub use crate::gsp::{GspCoreState, GspResetOutcome};
+pub use crate::gsp::{GspCoreState, GspResetOutcome, StagedFirmware};
 
 mod chip;
 mod fw;
@@ -53,6 +53,12 @@ mod gsp;
 /// (`.fwimage` / `.fwversion` / `.fwsignature*`). C-free; see [`fw`]. **P1.4.**
 pub fn parse_firmware(blob: &[u8]) -> Option<FwContainer> {
     fw::parse(blob)
+}
+
+/// Stage the GSP-RM `.fwimage` into a DMA-coherent sysmem buffer, returning its
+/// GPU-visible (guest-physical) address for the GSP boot to DMA from. **P1.5a.**
+pub fn stage_firmware(image: &[u8]) -> Option<StagedFirmware> {
+    gsp::stage_firmware_dma(image)
 }
 
 /// PCI vendor ID assigned to NVIDIA Corporation.

@@ -14,9 +14,63 @@
 //! against the in-tree `nova-core`/`nouveau` Rust re-derivations. See
 //! `kernel/comps/nvidia/P1-GSP-BOOT.md`.
 
-use ostd::{io::IoMem, mm::VmIoOnce};
+use ostd::{
+    io::IoMem,
+    mm::{HasDaddr, PAGE_SIZE, VmIo, VmIoOnce, dma::DmaCoherent},
+};
+use spin::Once;
 
 use crate::chip::{Architecture, ChipInfo};
+
+/// The DMA-coherent sysmem buffer holding the staged GSP-RM `.fwimage` (P1.5a).
+/// Kept alive for the life of the system so its guest-physical address stays
+/// valid for the GPU to DMA from.
+static STAGED_FW: Once<DmaCoherent> = Once::new();
+
+/// Result of staging the firmware into GPU-DMA-able sysmem (P1.5a).
+#[derive(Debug, Clone, Copy)]
+pub struct StagedFirmware {
+    /// GPU-visible (guest-physical) address of the buffer — what the GSP booter /
+    /// RISC-V core will DMA the firmware from. (No guest vIOMMU, so daddr==GPA.)
+    pub daddr: usize,
+    /// Bytes copied.
+    pub bytes: usize,
+    /// First/last 8 bytes read back from the DMA buffer matched the source.
+    pub verified: bool,
+}
+
+/// **P1.5a** — copy the GSP-RM `.fwimage` into a DMA-coherent sysmem buffer and
+/// return its GPU-visible (guest-physical) address. This is the substrate the
+/// GSP boot needs: the passed-through GPU DMAs using guest-physical addresses
+/// (no guest vIOMMU), so `daddr` is exactly where the booter/RISC-V core reads
+/// the firmware. Returns `None` if the contiguous DMA allocation fails (e.g. the
+/// image is too large to allocate contiguously — the real path scatters it via
+/// radix3 page tables, P1.5b).
+pub(crate) fn stage_firmware_dma(image: &[u8]) -> Option<StagedFirmware> {
+    if image.is_empty() {
+        return None;
+    }
+    let nframes = image.len().div_ceil(PAGE_SIZE);
+    let dma = DmaCoherent::alloc(nframes, true).ok()?;
+    dma.write_bytes(0, image).ok()?;
+
+    // Verify the copy landed: round-trip the first and last 8 bytes.
+    let mut head = [0u8; 8];
+    let mut tail = [0u8; 8];
+    let tail_off = image.len().saturating_sub(8);
+    let verified = dma.read_bytes(0, &mut head).is_ok()
+        && dma.read_bytes(tail_off, &mut tail).is_ok()
+        && head == image[..8]
+        && tail == image[tail_off..];
+
+    let daddr = dma.daddr();
+    STAGED_FW.call_once(|| dma);
+    Some(StagedFirmware {
+        daddr,
+        bytes: image.len(),
+        verified,
+    })
+}
 
 /// Base of the GSP engine in the BAR0 MMIO aperture (`NV_PGSP`).
 const NV_PGSP: usize = 0x0011_0000;
