@@ -22,6 +22,14 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Architecture {
+    /// Kepler (`GK10x`, e.g. the Quadro K4200) — pre-GSP, not drivable.
+    Kepler = 0x0e,
+    /// Kepler2 (`GK110`) — pre-GSP.
+    Kepler2 = 0x0f,
+    /// Maxwell first-gen (`GM10x`) — pre-GSP.
+    Maxwell1 = 0x11,
+    /// Maxwell second-gen (`GM20x`) — pre-GSP.
+    Maxwell2 = 0x12,
     /// Pascal (`GP10x`) — pre-GSP, not drivable by nvidia-open.
     Pascal = 0x13,
     /// Volta (`GV100`, e.g. the Quadro GV100) — pre-GSP, not drivable by
@@ -47,6 +55,10 @@ pub enum Architecture {
 impl Architecture {
     fn from_code(code: u32) -> Self {
         match code {
+            0x0e => Architecture::Kepler,
+            0x0f => Architecture::Kepler2,
+            0x11 => Architecture::Maxwell1,
+            0x12 => Architecture::Maxwell2,
             0x13 => Architecture::Pascal,
             0x14 => Architecture::Volta,
             0x16 => Architecture::Turing,
@@ -64,7 +76,13 @@ impl Architecture {
     /// they are identified yet not drivable.
     pub fn is_gsp_capable(self) -> bool {
         match self {
-            Architecture::Pascal | Architecture::Volta | Architecture::Unknown => false,
+            Architecture::Kepler
+            | Architecture::Kepler2
+            | Architecture::Maxwell1
+            | Architecture::Maxwell2
+            | Architecture::Pascal
+            | Architecture::Volta
+            | Architecture::Unknown => false,
             Architecture::Turing
             | Architecture::Ampere
             | Architecture::Hopper

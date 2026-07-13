@@ -20,6 +20,16 @@
 
 extern crate alloc;
 
+/// Set this crate's log prefix for `ostd::log`. This MUST be defined before any
+/// `mod` declaration (and before this file's own `info!` calls) so textual
+/// macro scoping can resolve it — otherwise the whole crate's log output
+/// silently vanishes. Mirrors `aster-input` / `aster-pci`.
+macro_rules! __log_prefix {
+    () => {
+        "nvidia: "
+    };
+}
+
 use alloc::sync::Arc;
 
 use aster_pci::{
@@ -34,13 +44,6 @@ use ostd::{bus::BusProbeError, mm::VmIoOnce};
 use crate::chip::ChipInfo;
 
 mod chip;
-
-/// Set this crate's log prefix for `ostd::log`.
-macro_rules! __log_prefix {
-    () => {
-        "nvidia: "
-    };
-}
 
 /// PCI vendor ID assigned to NVIDIA Corporation.
 const PCI_VENDOR_NVIDIA: u16 = 0x10de;
@@ -88,50 +91,39 @@ impl PciDriver for NvidiaGpuDriver {
         if id.vendor_id != PCI_VENDOR_NVIDIA || id.class != PCI_CLASS_DISPLAY {
             return Err((BusProbeError::DeviceNotMatch, device));
         }
-        // Record the match immediately (before the BAR0 read, which could fault)
-        // so the kernel can report it even if register reads fail.
-        record_match(id.device_id, 0);
-
-        ostd::info!(
-            "found NVIDIA GPU {:04x}:{:04x} at {:?}",
-            id.vendor_id,
-            id.device_id,
-            device.location(),
-        );
-        report_bars(&device);
-
-        // Read NV_PMC_BOOT_0 and decode the real chip identity. This both proves
-        // the register aperture is mapped and answers "can we drive it?".
-        let chip = match read_boot0(&mut device) {
-            Ok(chip) => chip,
-            Err(e) => {
-                ostd::warn!("  BAR0/NV_PMC_BOOT_0 read failed ({:?}); not claiming", e);
-                return Err((BusProbeError::DeviceNotMatch, device));
-            }
+        // Read NV_PMC_BOOT_0 (BAR0 offset 0) and decode the chip identity — this
+        // proves the register aperture is mapped and answers "can we drive it?".
+        // A failed read yields a zero-decode (Unknown) rather than dropping the
+        // device, so the report still records that we saw it.
+        let chip = read_boot0(&mut device).unwrap_or_else(|_| ChipInfo::from_boot0(0));
+        let msix_vectors = match device.acquire_msix_capability() {
+            Ok(Some(msix)) => msix.table_size(),
+            _ => 0,
         };
-        record_match(id.device_id, chip.boot0);
+        let gsp_capable = chip.architecture.is_gsp_capable();
+
+        // Record the full hardware inventory the driver read off the GPU over its
+        // vfio BARs. The kernel logs this (this crate's own `info!` is silent on
+        // x86); recorded before the GSP gate so pre-GSP cards are captured too.
+        record_report(GpuReport {
+            device_id: id.device_id,
+            chip,
+            gsp_capable,
+            bar_bytes: bar_sizes(&device),
+            msix_vectors,
+        });
+
+        // Crate-local logs (silent on x86; kept for when that's fixed / other archs).
         ostd::info!(
-            "  NV_PMC_BOOT_0 = {:#010x} -> {:?} impl {:#x} rev {}.{}",
-            chip.boot0,
-            chip.architecture,
-            chip.implementation,
-            chip.major_rev,
-            chip.minor_rev,
+            "found NVIDIA GPU {:04x}:{:04x} at {:?}; NV_PMC_BOOT_0={:#010x} -> {:?} impl {:#x} rev {}.{}, MSI-X {} vectors",
+            id.vendor_id, id.device_id, device.location(),
+            chip.boot0, chip.architecture, chip.implementation, chip.major_rev, chip.minor_rev, msix_vectors,
         );
 
-        if !chip.architecture.is_gsp_capable() {
-            // Enumerable, but `nvidia-open` (and thus this port) cannot drive a
-            // GSP-less GPU. Leave it unclaimed rather than pretend.
-            ostd::warn!("  no GSP (pre-Turing/unknown); nvidia-open cannot drive it — not claiming");
+        if !gsp_capable {
+            // Enumerable, but `nvidia-open` cannot drive a GSP-less GPU (pre-Turing).
+            ostd::warn!("  no GSP; nvidia-open cannot drive it — enumerated, not claimed");
             return Err((BusProbeError::DeviceNotMatch, device));
-        }
-
-        match device.acquire_msix_capability() {
-            Ok(Some(msix)) => {
-                ostd::info!("  MSI-X: {} vectors (GSP RPC + engine interrupts)", msix.table_size())
-            }
-            Ok(None) => ostd::warn!("  no MSI-X capability (GSP RPC needs MSI-X)"),
-            Err(e) => ostd::warn!("  MSI-X acquire failed: {:?}", e),
         }
 
         // P1 milestone lives here: hand the mapped GPU to the RM and boot GSP.
@@ -144,13 +136,17 @@ impl PciDriver for NvidiaGpuDriver {
     }
 }
 
-/// Log every BAR the GPU exposes — the P1 RM/GSP bring-up needs these addresses.
-fn report_bars(device: &PciCommonDevice) {
+/// The size (bytes) of each BAR the GPU exposes; index = BAR number, 0 = absent.
+/// For an NVIDIA GPU: BAR0 = the register aperture, BAR1 = the VRAM window,
+/// BAR3 = a secondary aperture.
+fn bar_sizes(device: &PciCommonDevice) -> [u64; 6] {
+    let mut sizes = [0u64; 6];
     for idx in 0..6u8 {
-        if let Some(bar) = device.bar_manager().bar(idx) {
-            ostd::info!("  BAR{}: {:?}", idx, bar);
+        if let Some(Bar::Memory(mem)) = device.bar_manager().bar(idx) {
+            sizes[idx as usize] = mem.size();
         }
     }
+    sizes
 }
 
 /// Read and decode `NV_PMC_BOOT_0` from BAR0 (the chip's identity register the
@@ -189,36 +185,41 @@ mod gsp {
     }
 }
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use spin::Once;
+use spin::{Mutex, Once};
+
+use crate::chip::Architecture;
 
 static REGISTERED: Once<()> = Once::new();
 
 /// Total number of PCI devices our driver was asked to probe (any vendor). Lets
 /// the kernel confirm the PCI bus was enumerated before we registered.
 pub static PROBED_COUNT: AtomicUsize = AtomicUsize::new(0);
-/// The last NVIDIA GPU we matched, packed as `(1<<63) | (device_id<<32) | boot0`
-/// (0 = none). Read back by the kernel to log via its own (working) logger.
-pub static MATCHED: AtomicU64 = AtomicU64::new(0);
 
-/// Records that we matched an NVIDIA GPU (device id + decoded `NV_PMC_BOOT_0`).
-pub(crate) fn record_match(device_id: u16, boot0: u32) {
-    MATCHED.store(
-        (1u64 << 63) | ((device_id as u64) << 32) | (boot0 as u64),
-        Ordering::Relaxed,
-    );
+/// The hardware inventory the driver read off the passed-through GPU over its
+/// vfio BARs. Surfaced to the kernel's (working) logger via [`report`] — the
+/// crate's own `info!` output does not reach the console on x86.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuReport {
+    pub device_id: u16,
+    pub chip: ChipInfo,
+    pub gsp_capable: bool,
+    /// BAR sizes in bytes (index = BAR number; 0 if the BAR is absent).
+    pub bar_bytes: [u64; 6],
+    /// Number of MSI-X interrupt vectors the GPU exposes (0 if none).
+    pub msix_vectors: u16,
 }
 
-/// Kernel-facing report: `(probed_count, Some((device_id, boot0)) | None)`.
-pub fn report() -> (usize, Option<(u16, u32)>) {
-    let m = MATCHED.load(Ordering::Relaxed);
-    let found = if m & (1u64 << 63) != 0 {
-        Some((((m >> 32) & 0xffff) as u16, (m & 0xffff_ffff) as u32))
-    } else {
-        None
-    };
-    (PROBED_COUNT.load(Ordering::Relaxed), found)
+static REPORT: Mutex<Option<GpuReport>> = Mutex::new(None);
+
+pub(crate) fn record_report(r: GpuReport) {
+    *REPORT.lock() = Some(r);
+}
+
+/// Kernel-facing report: `(probed_count, the GPU inventory | None)`.
+pub fn report() -> (usize, Option<GpuReport>) {
+    (PROBED_COUNT.load(Ordering::Relaxed), *REPORT.lock())
 }
 
 /// Registers the GPU driver with the PCI bus (idempotent). The bus probes
