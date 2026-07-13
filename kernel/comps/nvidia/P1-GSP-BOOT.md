@@ -92,6 +92,29 @@ issues), **Track 2** (CGO-free CUDA userspace).
   *Milestone renumber:* remaining steps are P1.4 firmware delivery + ELF parse,
   P1.5 WPR2 + firmware DMA, P1.6 RPC msgqueue, P1.7 BROM kick + `GSP_INIT_DONE`.
 
+- **P1.4 — DONE, verified on A5000 (commit `92c4b3281`).** `fw.rs` — a no_std
+  ELF64 section-header parser — locates the GSP-RM container's `.fwimage`,
+  `.fwversion`, `.fwsignature*`. The kernel reads the firmware from the initramfs
+  in `device::init_in_first_process` (post-rootfs; the probe is far too early).
+  Verified with the real `gsp_ga10x.bin` (595.80) baked into the initramfs:
+  kernel read 72,861,680 bytes, decoded machine `0xf3` (RISC-V), 17 sections, 10
+  signatures, `.fwimage`=72,818,688 bytes, `.fwversion`="595.80". C-free.
+
+**Front half of GSP boot (read state → reset → deliver firmware → parse) is DONE
+and hardware-verified.** Remaining is the deep, version-locked back half:
+
+- **P1.5 (the hard core, in progress):** allocate WPR2 in VRAM; build the
+  `GspFwWprMeta` descriptor (magic `0xdc3aae21371a60b3`, rev 1); build radix3
+  page tables for `.fwimage`; run the `booter_load` HS ACR ucode on SEC2 (base
+  `0x840000`) to authenticate + place the image in WPR2; DMA it in. This needs
+  **guest-DMA infrastructure** (DMA-able buffers + GPU-visible physical addrs via
+  the vfio IOMMU) and the version-locked descriptor/booter ABI. Not verifiable in
+  small increments — WPR + booter + DMA must all land before anything observable.
+- **P1.6:** RPC message queue (shared-mem cmd/status rings, MCTP/NVDM framing,
+  checksum/seqNum) — `msgqTxHeader`/`GSP_MSG_QUEUE_ELEMENT`/`rpc_message_header_v`.
+- **P1.7:** program libos boot args, write `BCR_CTRL=0x111` (CORE_SELECT_RISCV |
+  VALID | BRFETCH), poll for `GSP_INIT_DONE` on the status queue = **GSP booted.**
+
 ## Test rig
 
 The A5000 (Ampere/GSP) on the Precision laptop is the P1 dev target (display on
