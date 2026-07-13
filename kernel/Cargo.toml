@@ -17,7 +17,7 @@ aster-i8042.workspace = true
 aster-input.workspace = true
 aster-logger.workspace = true
 aster-network.workspace = true
-aster-nvidia = { workspace = true, optional = true }
+aster-nvidia.workspace = true
 aster-nvme.workspace = true
 aster-rights.workspace = true
 aster-rights-proc.workspace = true
@@ -91,10 +91,11 @@ aster-mlsdisk.workspace = true
 default = ["cvm_guest"]
 coverage = ["ostd/coverage"]
 cvm_guest = ["dep:tdx-guest", "ostd/cvm_guest", "aster-virtio/cvm_guest"]
-# Native NVIDIA GPU support (headless compute). Off by default so the kernel
-# stays C-free; enabling it pulls in the `aster-nvidia` component (and, in later
-# phases, the vendored nvidia-open RM). See asterkube/docs/GPU-CUDA-PORT-PLAN.md.
-nvidia_gpu = ["dep:aster-nvidia"]
+# Native NVIDIA GPU driving via the vendored nvidia-open RM (P1+). The pure-Rust
+# P0 driver (enumerate + NV_PMC_BOOT_0 decode) in `aster-nvidia` is always linked
+# and stays C-free; this feature will gate only the C RM. See
+# asterkube/docs/GPU-CUDA-PORT-PLAN.md.
+nvidia_gpu = []
 # By default we use the Sv48 address translation mode.
 riscv_sv39_mode = ["ostd/riscv_sv39_mode"]
 

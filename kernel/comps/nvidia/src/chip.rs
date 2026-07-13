@@ -22,6 +22,12 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Architecture {
+    /// Pascal (`GP10x`) — pre-GSP, not drivable by nvidia-open.
+    Pascal = 0x13,
+    /// Volta (`GV100`, e.g. the Quadro GV100) — pre-GSP, not drivable by
+    /// nvidia-open (there is no `gsp_gv100.bin`). Recognized so it identifies
+    /// correctly rather than as `Unknown`.
+    Volta = 0x14,
     /// Turing (`TU10x`/`TU11x`) — the first GSP generation.
     Turing = 0x16,
     /// Ampere (`GA100`/`GA10x`, e.g. the RTX A4000 `GA104`).
@@ -41,6 +47,8 @@ pub enum Architecture {
 impl Architecture {
     fn from_code(code: u32) -> Self {
         match code {
+            0x13 => Architecture::Pascal,
+            0x14 => Architecture::Volta,
             0x16 => Architecture::Turing,
             0x17 => Architecture::Ampere,
             0x18 => Architecture::Hopper,
@@ -52,10 +60,18 @@ impl Architecture {
     }
 
     /// `nvidia-open` (and therefore this port) drives only GSP-based GPUs, i.e.
-    /// Turing (`0x16`) and newer. Everything at or above the Turing code, that we
-    /// also recognize, is drivable.
+    /// Turing (`0x16`) and newer. Pascal/Volta are recognized but pre-GSP, so
+    /// they are identified yet not drivable.
     pub fn is_gsp_capable(self) -> bool {
-        !matches!(self, Architecture::Unknown)
+        match self {
+            Architecture::Pascal | Architecture::Volta | Architecture::Unknown => false,
+            Architecture::Turing
+            | Architecture::Ampere
+            | Architecture::Hopper
+            | Architecture::Ada
+            | Architecture::BlackwellGb100
+            | Architecture::BlackwellGb200 => true,
+        }
     }
 }
 

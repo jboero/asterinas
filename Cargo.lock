@@ -200,6 +200,7 @@ dependencies = [
  "aster-logger",
  "aster-mlsdisk",
  "aster-network",
+ "aster-nvidia",
  "aster-nvme",
  "aster-rights",
  "aster-rights-proc",
@@ -298,6 +299,17 @@ dependencies = [
  "ostd-pod",
  "spin",
  "zerocopy",
+]
+
+[[package]]
+name = "aster-nvidia"
+version = "0.1.0"
+dependencies = [
+ "aster-pci",
+ "aster-util",
+ "component",
+ "ostd",
+ "spin",
 ]
 
 [[package]]

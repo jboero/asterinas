@@ -80,6 +80,7 @@ impl PciDriver for NvidiaGpuDriver {
         &self,
         mut device: PciCommonDevice,
     ) -> Result<Arc<dyn PciDevice>, (BusProbeError, PciCommonDevice)> {
+        PROBED_COUNT.fetch_add(1, Ordering::Relaxed);
         let id = *device.device_id();
 
         // Match only NVIDIA display controllers. The GPU's HDA audio function
@@ -87,6 +88,9 @@ impl PciDriver for NvidiaGpuDriver {
         if id.vendor_id != PCI_VENDOR_NVIDIA || id.class != PCI_CLASS_DISPLAY {
             return Err((BusProbeError::DeviceNotMatch, device));
         }
+        // Record the match immediately (before the BAR0 read, which could fault)
+        // so the kernel can report it even if register reads fail.
+        record_match(id.device_id, 0);
 
         ostd::info!(
             "found NVIDIA GPU {:04x}:{:04x} at {:?}",
@@ -105,6 +109,7 @@ impl PciDriver for NvidiaGpuDriver {
                 return Err((BusProbeError::DeviceNotMatch, device));
             }
         };
+        record_match(id.device_id, chip.boot0);
         ostd::info!(
             "  NV_PMC_BOOT_0 = {:#010x} -> {:?} impl {:#x} rev {}.{}",
             chip.boot0,
@@ -184,14 +189,58 @@ mod gsp {
     }
 }
 
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use spin::Once;
+
+static REGISTERED: Once<()> = Once::new();
+
+/// Total number of PCI devices our driver was asked to probe (any vendor). Lets
+/// the kernel confirm the PCI bus was enumerated before we registered.
+pub static PROBED_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// The last NVIDIA GPU we matched, packed as `(1<<63) | (device_id<<32) | boot0`
+/// (0 = none). Read back by the kernel to log via its own (working) logger.
+pub static MATCHED: AtomicU64 = AtomicU64::new(0);
+
+/// Records that we matched an NVIDIA GPU (device id + decoded `NV_PMC_BOOT_0`).
+pub(crate) fn record_match(device_id: u16, boot0: u32) {
+    MATCHED.store(
+        (1u64 << 63) | ((device_id as u64) << 32) | (boot0 as u64),
+        Ordering::Relaxed,
+    );
+}
+
+/// Kernel-facing report: `(probed_count, Some((device_id, boot0)) | None)`.
+pub fn report() -> (usize, Option<(u16, u32)>) {
+    let m = MATCHED.load(Ordering::Relaxed);
+    let found = if m & (1u64 << 63) != 0 {
+        Some((((m >> 32) & 0xffff) as u16, (m & 0xffff_ffff) as u32))
+    } else {
+        None
+    };
+    (PROBED_COUNT.load(Ordering::Relaxed), found)
+}
+
+/// Registers the GPU driver with the PCI bus (idempotent). The bus probes
+/// already-enumerated devices and any that appear later. On a machine with no
+/// NVIDIA GPU passed through, this is a no-op.
+///
+/// This is called both from the `#[init_component]` hook and directly from the
+/// kernel's `driver::init`, because the component hook's link-section
+/// registration is unreliable for this crate; the direct call guarantees it runs.
+#[inline(never)]
+pub fn ensure_linked() {
+    REGISTERED.call_once(|| {
+        ostd::info!("ensure_linked() ENTER — registering PCI driver");
+        PCI_BUS
+            .lock()
+            .register_driver(Arc::new(NvidiaGpuDriver) as Arc<dyn PciDriver>);
+        ostd::info!("driver registered (P0: enumerate + decode NV_PMC_BOOT_0)");
+    });
+}
+
 #[init_component]
 fn nvidia_init() -> Result<(), ComponentInitError> {
-    // Register the GPU driver; the PCI bus probes already-enumerated devices and
-    // any that appear later. On a machine with no NVIDIA GPU passed through, this
-    // is a no-op.
-    PCI_BUS
-        .lock()
-        .register_driver(Arc::new(NvidiaGpuDriver) as Arc<dyn PciDriver>);
-    ostd::info!("driver registered (P0: enumerate + decode NV_PMC_BOOT_0)");
+    ensure_linked();
     Ok(())
 }
