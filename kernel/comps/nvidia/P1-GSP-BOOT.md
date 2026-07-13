@@ -103,7 +103,15 @@ issues), **Track 2** (CGO-free CUDA userspace).
 **Front half of GSP boot (read state → reset → deliver firmware → parse) is DONE
 and hardware-verified.** Remaining is the deep, version-locked back half:
 
-- **P1.5 (the hard core, in progress):** allocate WPR2 in VRAM; build the
+- **P1.5a — DONE, verified on A5000 (commit `480fd9456`).** The guest-DMA
+  substrate: `gsp::stage_firmware_dma()` allocates a DMA-coherent sysmem buffer
+  (ostd `DmaCoherent`), copies the parsed `.fwimage` in, and exposes its
+  GPU-visible guest-physical address. No guest vIOMMU → `daddr == GPA`, exactly
+  where the GSP booter/RISC-V core reads firmware. Verified: full 72,818,688-byte
+  `.fwimage` staged at GPU-phys `0x230000000`, round-trip `verified=true`. The
+  passed-through GPU can now DMA the firmware from sysmem.
+
+- **P1.5b/c (the version-locked core, in progress):** allocate WPR2 in VRAM; build the
   `GspFwWprMeta` descriptor (magic `0xdc3aae21371a60b3`, rev 1); build radix3
   page tables for `.fwimage`; run the `booter_load` HS ACR ucode on SEC2 (base
   `0x840000`) to authenticate + place the image in WPR2; DMA it in. This needs
