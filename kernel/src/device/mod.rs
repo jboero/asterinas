@@ -3,6 +3,7 @@
 mod evdev;
 mod fb;
 mod mem;
+mod nvidia;
 pub mod misc;
 mod pty;
 mod registry;
@@ -167,6 +168,7 @@ pub fn init_in_first_kthread() {
     misc::init_in_first_kthread();
     evdev::init_in_first_kthread();
     fb::init_in_first_kthread();
+    nvidia::init_in_first_kthread();
 }
 
 /// Initializes the device nodes in devtmpfs after mounting rootfs.

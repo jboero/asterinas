@@ -39,7 +39,7 @@ use aster_pci::{
     common_device::PciCommonDevice,
 };
 use component::{ComponentInitError, init_component};
-use ostd::{bus::BusProbeError, mm::VmIoOnce};
+use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
 
@@ -101,9 +101,19 @@ impl PciDriver for NvidiaGpuDriver {
             _ => 0,
         };
         let gsp_capable = chip.architecture.is_gsp_capable();
-        // Try to actually *use* GPU memory: write a pattern through the BAR1 VRAM
-        // window and read it back.
-        let vram_rw = test_vram_rw(&mut device);
+        // Acquire the BAR1 VRAM window once. We (a) round-trip a test pattern to
+        // prove Asterinas can use GPU memory, and (b) retain a clone of the
+        // `IoMem` so the kernel can expose it to userspace as `/dev/nvidia0`
+        // (a container process can then read/write GPU VRAM). The clone keeps
+        // the MMIO mapping alive after `device` is dropped below.
+        let vram_io = match device.bar_manager_mut().bar_mut(1) {
+            Some(Bar::Memory(mem)) => mem.acquire().ok().cloned(),
+            _ => None,
+        };
+        let vram_rw = vram_io.as_ref().map(test_vram_rw);
+        if let Some(io) = vram_io {
+            VRAM_IO_MEM.call_once(|| io);
+        }
         let bar_bytes = bar_sizes(&device);
 
         // Record the full hardware inventory the driver read off the GPU over its
@@ -154,29 +164,22 @@ fn bar_sizes(device: &PciCommonDevice) -> [u64; 6] {
     sizes
 }
 
-/// Attempt to use GPU VRAM: map BAR1 (the VRAM window) and round-trip a test
-/// pattern through it. Returns `Some(true)` if the read-back matched (Asterinas
-/// can read/write the GPU's memory), `Some(false)` if not, `None` if BAR1 is
-/// absent or can't be acquired. Uses two offsets to guard against a stuck bus
-/// returning a constant.
-fn test_vram_rw(device: &mut PciCommonDevice) -> Option<bool> {
-    use ostd::mm::VmIoOnce;
-
-    let Some(Bar::Memory(mem)) = device.bar_manager_mut().bar_mut(1) else {
-        return None;
-    };
-    let io = mem.acquire().ok()?;
+/// Attempt to use GPU VRAM: round-trip a test pattern through the BAR1 VRAM
+/// window. Returns `true` if the read-back matched (Asterinas can read/write the
+/// GPU's memory). Uses two offsets to guard against a stuck bus returning a
+/// constant. Returns `false` on any MMIO error.
+fn test_vram_rw(io: &IoMem) -> bool {
     let mut ok = true;
     for (off, pat) in [(0x1000usize, 0xa5c3_1e7fu32), (0x2000, 0x0f1e_2d3c)] {
         if io.write_once(off, &pat).is_err() {
-            return Some(false);
+            return false;
         }
         match io.read_once::<u32>(off) {
             Ok(v) => ok &= v == pat,
-            Err(_) => return Some(false),
+            Err(_) => return false,
         }
     }
-    Some(ok)
+    ok
 }
 
 /// Read and decode `NV_PMC_BOOT_0` from BAR0 (the chip's identity register the
@@ -222,6 +225,19 @@ use spin::{Mutex, Once};
 use crate::chip::Architecture;
 
 static REGISTERED: Once<()> = Once::new();
+
+/// The GPU's BAR1 VRAM-window `IoMem`, retained after probe so the kernel can
+/// surface it to userspace as `/dev/nvidia0` (mirrors `aster-framebuffer`'s
+/// `FRAMEBUFFER` global). A clone keeps the MMIO mapping alive independently of
+/// the `PciCommonDevice`. `None` until a GPU with a BAR1 is probed.
+pub static VRAM_IO_MEM: Once<IoMem> = Once::new();
+
+/// The GPU VRAM aperture (BAR1) as an `IoMem`, if a GPU has been probed. The
+/// kernel wraps this in a char device so a userspace/container process can
+/// `read`/`write`/`mmap` GPU memory. C-free; needs no GSP.
+pub fn vram_io_mem() -> Option<IoMem> {
+    VRAM_IO_MEM.get().cloned()
+}
 
 /// Total number of PCI devices our driver was asked to probe (any vendor). Lets
 /// the kernel confirm the PCI bus was enumerated before we registered.
