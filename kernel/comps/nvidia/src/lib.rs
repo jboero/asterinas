@@ -101,6 +101,10 @@ impl PciDriver for NvidiaGpuDriver {
             _ => 0,
         };
         let gsp_capable = chip.architecture.is_gsp_capable();
+        // Try to actually *use* GPU memory: write a pattern through the BAR1 VRAM
+        // window and read it back.
+        let vram_rw = test_vram_rw(&mut device);
+        let bar_bytes = bar_sizes(&device);
 
         // Record the full hardware inventory the driver read off the GPU over its
         // vfio BARs. The kernel logs this (this crate's own `info!` is silent on
@@ -109,8 +113,9 @@ impl PciDriver for NvidiaGpuDriver {
             device_id: id.device_id,
             chip,
             gsp_capable,
-            bar_bytes: bar_sizes(&device),
+            bar_bytes,
             msix_vectors,
+            vram_rw,
         });
 
         // Crate-local logs (silent on x86; kept for when that's fixed / other archs).
@@ -147,6 +152,31 @@ fn bar_sizes(device: &PciCommonDevice) -> [u64; 6] {
         }
     }
     sizes
+}
+
+/// Attempt to use GPU VRAM: map BAR1 (the VRAM window) and round-trip a test
+/// pattern through it. Returns `Some(true)` if the read-back matched (Asterinas
+/// can read/write the GPU's memory), `Some(false)` if not, `None` if BAR1 is
+/// absent or can't be acquired. Uses two offsets to guard against a stuck bus
+/// returning a constant.
+fn test_vram_rw(device: &mut PciCommonDevice) -> Option<bool> {
+    use ostd::mm::VmIoOnce;
+
+    let Some(Bar::Memory(mem)) = device.bar_manager_mut().bar_mut(1) else {
+        return None;
+    };
+    let io = mem.acquire().ok()?;
+    let mut ok = true;
+    for (off, pat) in [(0x1000usize, 0xa5c3_1e7fu32), (0x2000, 0x0f1e_2d3c)] {
+        if io.write_once(off, &pat).is_err() {
+            return Some(false);
+        }
+        match io.read_once::<u32>(off) {
+            Ok(v) => ok &= v == pat,
+            Err(_) => return Some(false),
+        }
+    }
+    Some(ok)
 }
 
 /// Read and decode `NV_PMC_BOOT_0` from BAR0 (the chip's identity register the
@@ -209,6 +239,10 @@ pub struct GpuReport {
     pub bar_bytes: [u64; 6],
     /// Number of MSI-X interrupt vectors the GPU exposes (0 if none).
     pub msix_vectors: u16,
+    /// VRAM round-trip through the BAR1 window: `Some(true)` if a pattern written
+    /// to GPU memory read back correctly (the driver can *use* GPU VRAM),
+    /// `Some(false)` if it didn't, `None` if BAR1 is absent / not acquirable.
+    pub vram_rw: Option<bool>,
 }
 
 static REPORT: Mutex<Option<GpuReport>> = Mutex::new(None);

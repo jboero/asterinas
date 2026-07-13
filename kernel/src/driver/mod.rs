@@ -36,6 +36,15 @@ pub fn init() {
                 r.bar_bytes[0] >> 20, r.bar_bytes[1] >> 20, r.bar_bytes[3] >> 20,
                 r.msix_vectors, r.gsp_capable,
             );
+            match r.vram_rw {
+                Some(true) => info!(
+                    "nvidia:   VRAM read/write via BAR1: OK — Asterinas can use the GPU's memory"
+                ),
+                Some(false) => info!(
+                    "nvidia:   VRAM read/write via BAR1: no round-trip (aperture not mapped to VRAM without RM init)"
+                ),
+                None => {}
+            }
             if r.gsp_capable {
                 info!("nvidia:   GSP-capable → next milestone: load GSP firmware + RM handshake (P1)");
             } else {
