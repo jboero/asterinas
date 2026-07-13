@@ -50,6 +50,33 @@ image layout come from nvidia-open (C). At the **RPC boundary (P1.6)** we choose
 Then: **P2** (UVM / unified memory), **P3** (uAPI: the ioctls CUDA userspace
 issues), **Track 2** (CGO-free CUDA userspace).
 
+## Status log
+
+- **P1.1 — DONE (verified on RTX A5000, GA104 Ampere), commit `7a715a711`.**
+  The driver retains BAR0 and reads the GSP core state over it:
+  `RISC-V=true, IMEM=64KiB, falcon_halted=true, GFW_boot_complete=true,
+  HWCFG2=0x47f7 (RISCV bit set), CPUCTL/RISCV_CPUCTL=0x10 (halted), MBOX0/1=0` —
+  the correct pre-boot state. `gsp.rs` holds the cited register map.
+
+- **P1.2 — firmware located + characterized.** On a driver-595.80 host:
+  `/lib/firmware/nvidia/595.80/gsp_ga10x.bin` is a **72.8 MB RISC-V ELF**
+  (`e_machine=0xf3`) — the monolithic GSP-RM image (radix3 ELF). The GA104 set
+  also ships split under `/lib/firmware/nvidia/ga104/gsp/`: `gsp-<ver>.bin.xz`
+  (GSP-RM), `bootloader` (RISC-V bootloader), `booter_load`/`booter_unload`
+  (HS ACR ucode). These signed blobs are the one non-negotiable vendor
+  dependency; everything else stays Rust.
+
+  **Key architectural finding for P1.2+:** the GSP boot **must not** run in the
+  PCI probe. Probe happens at early PCI init, long before any filesystem is
+  mounted, so the driver cannot `request_firmware` there, and a 72 MB embed is
+  unacceptable kernel bloat. The boot must be a **deferred operation** —
+  triggered after rootfs/initramfs is up (e.g. via an ioctl on `/dev/nvidia0`,
+  or a kthread post-fs-init) — with the firmware delivered through the initramfs
+  (or a virtio-fs/host share during dev). P1.2 therefore = (a) a `GspFirmware`
+  provider abstraction the kernel fills from the initramfs, (b) parse the
+  gsp_ga10x ELF/container layout, (c) move `gsp::boot()` out of probe into a
+  deferred entry point.
+
 ## Test rig
 
 The A5000 (Ampere/GSP) on the Precision laptop is the P1 dev target (display on
