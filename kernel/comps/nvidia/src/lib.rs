@@ -42,10 +42,18 @@ use component::{ComponentInitError, init_component};
 use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
+pub use crate::fw::FwContainer;
 pub use crate::gsp::{GspCoreState, GspResetOutcome};
 
 mod chip;
+mod fw;
 mod gsp;
+
+/// Parse a GSP firmware blob (`gsp_ga10x.bin`) into its container layout
+/// (`.fwimage` / `.fwversion` / `.fwsignature*`). C-free; see [`fw`]. **P1.4.**
+pub fn parse_firmware(blob: &[u8]) -> Option<FwContainer> {
+    fw::parse(blob)
+}
 
 /// PCI vendor ID assigned to NVIDIA Corporation.
 const PCI_VENDOR_NVIDIA: u16 = 0x10de;

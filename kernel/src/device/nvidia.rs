@@ -151,3 +151,58 @@ pub(super) fn init_in_first_kthread() {
     }
     char::register(Arc::new(NvidiaGpu0)).expect("failed to register /dev/nvidia0 char device");
 }
+
+/// Candidate initramfs paths for the GSP-RM firmware image (P1.4). The driver
+/// probe runs before any filesystem exists, so the firmware is read here, after
+/// rootfs mount, and parsed to locate the `.fwimage` payload the GSP boot will
+/// DMA into VRAM (P1.5).
+const GSP_FW_PATHS: &[&str] = &["/gsp_ga10x.bin", "/lib/firmware/gsp_ga10x.bin"];
+
+/// P1.4: locate, read, and parse a staged GSP firmware image. Non-fatal — if no
+/// firmware was baked into the initramfs, this just logs that and returns.
+pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolver) {
+    use crate::fs::vfs::path::FsPath;
+
+    let mut path = None;
+    for p in GSP_FW_PATHS {
+        if let Ok(fp) = FsPath::try_from(*p) {
+            if let Ok(found) = path_resolver.lookup(&fp) {
+                path = Some((*p, found));
+                break;
+            }
+        }
+    }
+    let Some((name, path)) = path else {
+        info!("nvidia: no GSP firmware staged in initramfs (P1.4 skipped)");
+        return;
+    };
+
+    let size = path.size();
+    let mut buf = alloc::vec![0u8; size];
+    let n = match path.inode().read_bytes_at(0, &mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            info!("nvidia: failed to read GSP firmware {}: {:?}", name, e);
+            return;
+        }
+    };
+    let blob = &buf[..n];
+
+    match aster_nvidia::parse_firmware(blob) {
+        Some(fw) => {
+            info!(
+                "nvidia: GSP firmware {} parsed (P1.4): {} bytes, machine={:#x} (0xf3=RISC-V), {} sections, {} signatures",
+                name, n, fw.machine, fw.section_count, fw.signature_count,
+            );
+            info!(
+                "nvidia:   .fwimage={} bytes, .fwversion={:?}",
+                fw.image.map(|s| s.size).unwrap_or(0),
+                fw.version_str(blob),
+            );
+        }
+        None => info!(
+            "nvidia: GSP firmware {} present ({} bytes) but not a valid ELF container",
+            name, n
+        ),
+    }
+}
