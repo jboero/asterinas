@@ -46,7 +46,20 @@ pub fn init() {
                 None => {}
             }
             if r.gsp_capable {
-                info!("nvidia:   GSP-capable → next milestone: load GSP firmware + RM handshake (P1)");
+                info!("nvidia:   GSP-capable → P1 GSP bring-up (booting the GPU System Processor)");
+                if let Some(g) = r.gsp_state {
+                    info!(
+                        "nvidia:   GSP core: RISC-V={} IMEM={}KiB DMEM={}KiB falcon_halted={} GFW_boot_complete={}",
+                        g.riscv_present, g.imem_bytes / 1024, g.dmem_bytes / 1024,
+                        g.falcon_halted, g.gfw_boot_complete,
+                    );
+                    info!(
+                        "nvidia:   GSP regs: HWCFG={:#010x} HWCFG2={:#010x} CPUCTL={:#010x} RISCV_CPUCTL={:#010x} MBOX0={:#010x} MBOX1={:#010x}",
+                        g.hwcfg, g.hwcfg2, g.cpuctl, g.riscv_cpuctl, g.mailbox0, g.mailbox1,
+                    );
+                } else {
+                    info!("nvidia:   GSP core: register block not reachable (BAR0 unavailable)");
+                }
             } else {
                 info!("nvidia:   pre-GSP architecture → enumerated + identified, but not drivable by nvidia-open");
             }

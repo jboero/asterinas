@@ -42,8 +42,10 @@ use component::{ComponentInitError, init_component};
 use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
+pub use crate::gsp::GspCoreState;
 
 mod chip;
+mod gsp;
 
 /// PCI vendor ID assigned to NVIDIA Corporation.
 const PCI_VENDOR_NVIDIA: u16 = 0x10de;
@@ -91,21 +93,37 @@ impl PciDriver for NvidiaGpuDriver {
         if id.vendor_id != PCI_VENDOR_NVIDIA || id.class != PCI_CLASS_DISPLAY {
             return Err((BusProbeError::DeviceNotMatch, device));
         }
-        // Read NV_PMC_BOOT_0 (BAR0 offset 0) and decode the chip identity — this
-        // proves the register aperture is mapped and answers "can we drive it?".
-        // A failed read yields a zero-decode (Unknown) rather than dropping the
-        // device, so the report still records that we saw it.
-        let chip = read_boot0(&mut device).unwrap_or_else(|_| ChipInfo::from_boot0(0));
+        // Acquire the BAR0 register aperture once. Decode NV_PMC_BOOT_0 (offset 0)
+        // for the chip identity — proving the aperture is mapped and answering
+        // "can we drive it?" — and retain a clone in REG_IO_MEM for the GSP boot
+        // path. A failed read yields a zero-decode (Unknown) rather than dropping
+        // the device, so the report still records that we saw it.
+        let reg_io = match device.bar_manager_mut().bar_mut(0) {
+            Some(Bar::Memory(mem)) => mem.acquire().ok().cloned(),
+            _ => None,
+        };
+        let chip = reg_io
+            .as_ref()
+            .and_then(|io| io.read_once::<u32>(NV_PMC_BOOT_0).ok())
+            .map(ChipInfo::from_boot0)
+            .unwrap_or_else(|| ChipInfo::from_boot0(0));
         let msix_vectors = match device.acquire_msix_capability() {
             Ok(Some(msix)) => msix.table_size(),
             _ => 0,
         };
         let gsp_capable = chip.architecture.is_gsp_capable();
+        // P1.1: for GSP-capable chips, read the GSP microprocessor state (falcon /
+        // RISC-V core, over BAR0). Read-only; the boot sequence comes next.
+        let gsp_state = if gsp_capable {
+            reg_io.as_ref().and_then(gsp::probe_state)
+        } else {
+            None
+        };
         // Acquire the BAR1 VRAM window once. We (a) round-trip a test pattern to
         // prove Asterinas can use GPU memory, and (b) retain a clone of the
         // `IoMem` so the kernel can expose it to userspace as `/dev/nvidia0`
-        // (a container process can then read/write GPU VRAM). The clone keeps
-        // the MMIO mapping alive after `device` is dropped below.
+        // (a container process can then read/write GPU VRAM). The clones keep the
+        // MMIO mappings alive after `device` is dropped below.
         let vram_io = match device.bar_manager_mut().bar_mut(1) {
             Some(Bar::Memory(mem)) => mem.acquire().ok().cloned(),
             _ => None,
@@ -113,6 +131,9 @@ impl PciDriver for NvidiaGpuDriver {
         let vram_rw = vram_io.as_ref().map(test_vram_rw);
         if let Some(io) = vram_io {
             VRAM_IO_MEM.call_once(|| io);
+        }
+        if let Some(io) = reg_io {
+            REG_IO_MEM.call_once(|| io);
         }
         let bar_bytes = bar_sizes(&device);
 
@@ -126,6 +147,7 @@ impl PciDriver for NvidiaGpuDriver {
             bar_bytes,
             msix_vectors,
             vram_rw,
+            gsp_state,
         });
 
         // Crate-local logs (silent on x86; kept for when that's fixed / other archs).
@@ -182,42 +204,6 @@ fn test_vram_rw(io: &IoMem) -> bool {
     ok
 }
 
-/// Read and decode `NV_PMC_BOOT_0` from BAR0 (the chip's identity register the
-/// NVIDIA RM reads first). Proves the register aperture is mapped and MMIO reads
-/// work; P1 replaces this with the RM's real register programming.
-fn read_boot0(device: &mut PciCommonDevice) -> ostd::Result<ChipInfo> {
-    let Some(Bar::Memory(mem_bar)) = device.bar_manager_mut().bar_mut(0) else {
-        return Err(ostd::Error::InvalidArgs);
-    };
-    let io_mem = mem_bar.acquire()?;
-    let boot0: u32 = io_mem.read_once(NV_PMC_BOOT_0)?;
-    Ok(ChipInfo::from_boot0(boot0))
-}
-
-/// P1: GSP firmware load + RM handshake. Not yet implemented — this is the next
-/// milestone in `GPU-CUDA-PORT-PLAN.md` (§3 P1), and where the vendored C RM is
-/// linked in behind this same feature.
-mod gsp {
-    use crate::chip::{Architecture, ChipInfo};
-
-    /// The GSP firmware image each architecture needs (matched at boot). Ampere
-    /// (the RTX A4000) uses `gsp_ga10x.bin`; Turing uses `gsp_tu10x.bin`.
-    pub(super) fn firmware_name(arch: Architecture) -> &'static str {
-        match arch {
-            Architecture::Turing => "gsp_tu10x.bin",
-            _ => "gsp_ga10x.bin",
-        }
-    }
-
-    pub(super) fn boot_stub(chip: &ChipInfo) {
-        ostd::info!(
-            "  P1 TODO: load GSP firmware {} + RM handshake ({:?})",
-            firmware_name(chip.architecture),
-            chip.architecture,
-        );
-    }
-}
-
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use spin::{Mutex, Once};
@@ -237,6 +223,16 @@ pub static VRAM_IO_MEM: Once<IoMem> = Once::new();
 /// `read`/`write`/`mmap` GPU memory. C-free; needs no GSP.
 pub fn vram_io_mem() -> Option<IoMem> {
     VRAM_IO_MEM.get().cloned()
+}
+
+/// The GPU's BAR0 register aperture `IoMem`, retained after probe. This is the
+/// GPU's control surface — the GSP microprocessor, engine registers, etc. — and
+/// the substrate the P1 GSP boot path drives. `None` until a GPU is probed.
+pub static REG_IO_MEM: Once<IoMem> = Once::new();
+
+/// The GPU register aperture (BAR0) as an `IoMem`, if a GPU has been probed.
+pub fn reg_io_mem() -> Option<IoMem> {
+    REG_IO_MEM.get().cloned()
 }
 
 /// Total number of PCI devices our driver was asked to probe (any vendor). Lets
@@ -259,6 +255,9 @@ pub struct GpuReport {
     /// to GPU memory read back correctly (the driver can *use* GPU VRAM),
     /// `Some(false)` if it didn't, `None` if BAR1 is absent / not acquirable.
     pub vram_rw: Option<bool>,
+    /// GSP microprocessor state read over BAR0 (P1.1). `Some` for GSP-capable
+    /// chips where the register block was reachable; `None` otherwise.
+    pub gsp_state: Option<GspCoreState>,
 }
 
 static REPORT: Mutex<Option<GpuReport>> = Mutex::new(None);
