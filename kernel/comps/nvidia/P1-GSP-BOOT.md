@@ -11,6 +11,22 @@ contexts, channels, and submit compute — the substrate CUDA needs.
 Target GPU: **Ampere GA10x (GA104)** — the RTX A4000 / A5000. GSP-capable
 (`GSP-drivable=true`, proven on the A5000).
 
+## Status: P1.1–P1.5b done, hardware-verified. Commits on branch `cuda-p1`.
+
+- **P1.5b — hardware-verified (K4200, local; the radix3/WPR-meta path is
+  GPU-independent sysmem work so it runs on any enumerated GPU).** From a real
+  boot: `.fwimage` staged at GPU-phys `0x210000000` (verified); **radix3 built:
+  root@`0x2145e5000`, 17778 fw pages via 35 L2 pages, verified=true** (in-guest
+  L0→L1→L2 read-back walk); **GspFwWprMeta: 256 bytes, magic
+  `0xdc3aae21371a60b3` rev 1**. Page math exact (72,818,688 B = 17,778×4K;
+  ⌈17778/512⌉ = 35 L2 pages). Commit `b8236980f`.
+
+- **Remaining: P1.5c → P1.7** — WPR2 FB-layout math, SEC2 HS-secured booter
+  execution, RPC msgqueue, RISC-V BROM kick, `GSP_INIT_DONE`. The version-locked,
+  HS-signed core; fails silently on any byte-wrong field, no HW debug visibility.
+  The SEC2-booter execution procedure still needs to be transcribed from
+  nvidia-open/nouveau (research was blocked by a session usage limit).
+
 ## Why this is large, and the honest scope
 
 The GSP on Ampere is a RISC-V "Peregrine" core with a Falcon front-end. Booting
