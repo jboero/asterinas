@@ -28,11 +28,46 @@ A4000's own silicon family — strongest verification short of the literal A4000
   `0xdc3aae21371a60b3` rev 1**. Page math exact (72,818,688 B = 17,778×4K;
   ⌈17778/512⌉ = 35 L2 pages). Commit `b8236980f`.
 
-- **Remaining: P1.5c → P1.7** — WPR2 FB-layout math, SEC2 HS-secured booter
-  execution, RPC msgqueue, RISC-V BROM kick, `GSP_INIT_DONE`. The version-locked,
-  HS-signed core; fails silently on any byte-wrong field, no HW debug visibility.
-  The SEC2-booter execution procedure still needs to be transcribed from
-  nvidia-open/nouveau (research was blocked by a session usage limit).
+- **P1.5c SEC2 substrate — DONE, verified A5000 (commit `153a08128`).** SEC2
+  falcon (`NV_PSEC2=0x840000`) reachable (HWCFG2=0x67f7, IMEM/DMEM=64KiB) but
+  `CPUCTL=0xbadf5620` (priv-locked). Proven on silicon: **SEC2 is heavy-secured;
+  the Booter must load via the HS secure-DMA + BROM path, not plain STARTCPU.**
+
+### Remaining: the full Booter run + boot handoff (procedure fully mapped)
+
+Exact sequence (nouveau r535, v6.9), SEC2-base `0x840000` relative unless noted:
+1. **Version-match the firmware.** The Booter authenticates the GSP image, so
+   both must be the same version. Switch off the 595.80 monolithic `gsp_ga10x.bin`
+   to the self-consistent **570.144 split set** (`gsp-570.144` + `bootloader-570.144`
+   + `booter_load-570.144` + `booter_unload-570.144`, all staged in scratchpad/fw).
+2. **HS-patch the booter** (`parse_hs_ucode` gives the container): read
+   `nvfw_hs_header_v2`, patch the selected production signature at `patch_loc`
+   (`nvkm_falcon_fw_sign`); `boot_addr = start_tag << 8`.
+3. **Reset SEC2 falcon**, DMA-load booter code(secure)/data into SEC2 IMEM/DMEM
+   from sysmem: per transfer write `DMATRFBASE(0x110)=phys>>8`, `DMATRFBASE1(0x128)=0`,
+   `DMATRFMOFFS(0x114)=dst`, `DMATRFFBOFFS(0x11c)=src`, `DMATRFCMD(0x118)=cmd`
+   (`cmd=(ilog2(len)-2)<<8`, `|0x10`=IMEM, `|0x4`=secure); poll `0x118 & 0x2`=idle.
+4. **BROM sig regs** (addr2=0x1000): `0x841210`=dmem_sign, `0x84119c`=engine_id,
+   `0x841198`=ucode_id, `0x841180`=1 (enable).
+5. **Kick**: `MAILBOX0(0x840040)=wpr_meta_phys_lo`, `MAILBOX1(0x840044)=hi`,
+   `BOOTVEC(0x840104)=boot_addr`, `CPUCTL(0x840100)=0x2` (STARTCPU).
+6. **Poll**: SEC2 `CPUCTL(0x840100) & 0x10` (HALTED, 2s); success iff
+   `MAILBOX0(0x840040)==0`. The booter has now set up WPR2 **and booted the GSP
+   RISC-V itself** (CPU does NOT touch GSP BCR_CTRL/CPUCTL).
+7. **Verify GSP RISC-V active**: write `gsp.boot.app_version` to GSP falcon
+   `0x110080`; check GSP `0x111388 & 0x80` (RISC-V active).
+8. **Fill `GspFwWprMeta` fully** (P1.5b has magic/radix3; add the WPR2 FB-layout
+   fields: `gspFwWprStart/HeapOffset/HeapSize/gspFwOffset/bootBinOffset/frtsOffset/
+   frtsSize` = FB physical addrs at top of FB, 128KB-aligned; `sysmemAddrOf*` =
+   host DMA addrs). Bootloader code/data/manifest offsets from `bootloader-570.144`.
+9. **RPC msgqueue** (P1.6): shared region = 2× `0x40000` (cmd+status); tx header
+   `version=0,size=0x40000,entryOff=0x1000,msgSize=0x1000,writePtr=0,flags=1`;
+   deliver `sharedMemPhysAddr`+offsets via the `GSP_ARGUMENTS_CACHED` rmargs page.
+10. **Boot-done** (P1.7): block until a status-queue RPC arrives with
+    `function == 0x1001` (`NV_VGPU_MSG_EVENT_GSP_INIT_DONE`) and `rpc_result==0`.
+
+Risk: version-locked, HS-signed, silent-fail, no HW debug. This is the
+multi-week core; nova-core/nouveau r535 are the reference impls.
 
 ## Why this is large, and the honest scope
 
