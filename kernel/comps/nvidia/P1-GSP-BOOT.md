@@ -13,6 +13,13 @@ Target GPU: **Ampere GA10x (GA104)** — the RTX A4000 / A5000. GSP-capable
 
 ## Status: P1.1–P1.5b done, hardware-verified. Commits on branch `cuda-p1`.
 
+**Full chain re-verified on the actual RTX A5000 (GA104 Ampere, GSP-capable) in
+one boot:** GSP core read (RISC-V=true, GFW-complete) → reset (0xbadf
+reset-into-RISC-V) → firmware parse (72.8MB, 595.80) → `.fwimage` staged @
+`0x210000000` (verified) → radix3 root@`0x2145e5000`, 17778 pages/35 L2 pages
+(verified) → GspFwWprMeta 256B magic ok → GPU-IN-CONTAINER PASS. This is the
+A4000's own silicon family — strongest verification short of the literal A4000.
+
 - **P1.5b — hardware-verified (K4200, local; the radix3/WPR-meta path is
   GPU-independent sysmem work so it runs on any enumerated GPU).** From a real
   boot: `.fwimage` staged at GPU-phys `0x210000000` (verified); **radix3 built:
