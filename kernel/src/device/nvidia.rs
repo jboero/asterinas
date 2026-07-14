@@ -203,12 +203,33 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
             if let Some(img) = fw.image {
                 if let Some(image) = blob.get(img.offset..img.offset + img.size) {
                     match aster_nvidia::stage_firmware(image) {
-                        Some(s) => info!(
-                            "nvidia:   .fwimage staged for DMA (P1.5a): {} bytes at GPU-phys {:#x}, verified={}",
-                            s.bytes, s.daddr, s.verified,
-                        ),
+                        Some(s) => {
+                            info!(
+                                "nvidia:   .fwimage staged for DMA (P1.5a): {} bytes at GPU-phys {:#x}, verified={}",
+                                s.bytes, s.daddr, s.verified,
+                            );
+                            // P1.5b: build the radix3 page table over the staged
+                            // firmware + the byte-exact WPR descriptor the Booter reads.
+                            if let Some(rx) = aster_nvidia::build_radix3(s.daddr, s.bytes) {
+                                info!(
+                                    "nvidia:   radix3 built (P1.5b): root@{:#x}, {} fw pages via {} L2 pages, verified={}",
+                                    rx.root_daddr, rx.fw_pages, rx.l2_pages, rx.verified,
+                                );
+                                let mut meta = aster_nvidia::GspFwWprMeta::new();
+                                meta.sysmem_addr_of_radix3_elf = rx.root_daddr as u64;
+                                meta.size_of_radix3_elf = s.bytes as u64;
+                                info!(
+                                    "nvidia:   GspFwWprMeta built (P1.5b): {} bytes, magic={:#x} rev={}, radix3_root={:#x}",
+                                    core::mem::size_of::<aster_nvidia::GspFwWprMeta>(),
+                                    meta.magic, meta.revision, meta.sysmem_addr_of_radix3_elf,
+                                );
+                                info!(
+                                    "nvidia:   P1.5c+ TODO: WPR2 FB layout + SEC2 HS booter + BROM kick + GSP_INIT_DONE (version-locked core)",
+                                );
+                            }
+                        }
                         None => info!(
-                            "nvidia:   .fwimage DMA staging failed ({} bytes — contiguous alloc; radix3 scatter is P1.5b)",
+                            "nvidia:   .fwimage DMA staging failed ({} bytes)",
                             img.size,
                         ),
                     }

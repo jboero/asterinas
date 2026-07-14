@@ -129,3 +129,56 @@ impl FwContainer {
         str::from_utf8(&raw[..end]).ok().map(str::trim)
     }
 }
+
+/// The NVIDIA `.bin` container magic (`nvfw_bin_hdr.bin_magic`, little-endian
+/// `0x10de` = the NVIDIA PCI vendor ID) used by the booter/bootloader ucode
+/// blobs (`booter_load-*.bin`, `bootloader-*.bin`).
+pub const NVFW_BIN_MAGIC: u32 = 0x10de;
+
+/// A parsed NVIDIA HS (heavy-secured) ucode container — the `booter_load` /
+/// `booter_unload` ACR ucode that runs on SEC2 to set up WPR2, and the RISC-V
+/// `bootloader`. Layout: `nvfw_bin_hdr` then, at `header_offset`, an
+/// `nvfw_hs_header_v2`; the actual ucode image is at `data_offset`. **P1.5c.**
+#[derive(Debug, Clone, Copy)]
+pub struct HsUcode {
+    /// `bin_ver`.
+    pub version: u32,
+    /// Byte range of the ucode image (code+data) within the blob.
+    pub data: FwSection,
+    /// Byte range of the production signature within the blob.
+    pub sig_prod: FwSection,
+    /// Number of signatures (`num_sig`).
+    pub num_sig: u32,
+}
+
+/// Parse an NVIDIA HS ucode `.bin` container (booter / bootloader). Verified
+/// against real `booter_load-570.144.bin` (magic `0x10de`, ver 1).
+pub fn parse_hs_ucode(blob: &[u8]) -> Option<HsUcode> {
+    // nvfw_bin_hdr: bin_magic, bin_ver, bin_size, header_offset, data_offset, data_size
+    if rd_u32(blob, 0x00)? != NVFW_BIN_MAGIC {
+        return None;
+    }
+    let version = rd_u32(blob, 0x04)?;
+    let header_offset = rd_u32(blob, 0x0c)? as usize;
+    let data_offset = rd_u32(blob, 0x10)? as usize;
+    let data_size = rd_u32(blob, 0x14)? as usize;
+
+    // nvfw_hs_header_v2 at header_offset: sig_prod_offset, sig_prod_size,
+    // patch_loc, patch_sig, meta_data_offset, meta_data_size, num_sig, ...
+    let sig_prod_offset = rd_u32(blob, header_offset.checked_add(0x00)?)? as usize;
+    let sig_prod_size = rd_u32(blob, header_offset.checked_add(0x04)?)? as usize;
+    let num_sig = rd_u32(blob, header_offset.checked_add(0x18)?)?;
+
+    Some(HsUcode {
+        version,
+        data: FwSection {
+            offset: data_offset,
+            size: data_size,
+        },
+        sig_prod: FwSection {
+            offset: sig_prod_offset,
+            size: sig_prod_size,
+        },
+        num_sig,
+    })
+}

@@ -42,12 +42,21 @@ use component::{ComponentInitError, init_component};
 use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
+pub use crate::boot::{GspFwWprMeta, Radix3};
 pub use crate::fw::FwContainer;
 pub use crate::gsp::{GspCoreState, GspResetOutcome, StagedFirmware};
 
+mod boot;
 mod chip;
 mod fw;
 mod gsp;
+
+/// Build the radix3 page table over the staged firmware (returns the level-0
+/// root guest-physical address for `GspFwWprMeta.sysmem_addr_of_radix3_elf`).
+/// **P1.5b.**
+pub fn build_radix3(fw_daddr: usize, fw_size: usize) -> Option<Radix3> {
+    boot::build_radix3(fw_daddr, fw_size)
+}
 
 /// Parse a GSP firmware blob (`gsp_ga10x.bin`) into its container layout
 /// (`.fwimage` / `.fwversion` / `.fwsignature*`). C-free; see [`fw`]. **P1.4.**
