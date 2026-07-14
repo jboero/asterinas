@@ -44,7 +44,7 @@ use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 use crate::chip::ChipInfo;
 pub use crate::boot::{GspFwWprMeta, Radix3};
 pub use crate::fw::FwContainer;
-pub use crate::gsp::{GspCoreState, GspResetOutcome, StagedFirmware};
+pub use crate::gsp::{GspCoreState, GspResetOutcome, Sec2State, StagedFirmware};
 
 mod boot;
 mod chip;
@@ -150,6 +150,12 @@ impl PciDriver for NvidiaGpuDriver {
         } else {
             None
         };
+        // P1.5c: read the SEC2 falcon state (the engine that runs the Booter).
+        let sec2_state = if gsp_capable {
+            reg_io.as_ref().and_then(gsp::sec2_probe_state)
+        } else {
+            None
+        };
         // Acquire the BAR1 VRAM window once. We (a) round-trip a test pattern to
         // prove Asterinas can use GPU memory, and (b) retain a clone of the
         // `IoMem` so the kernel can expose it to userspace as `/dev/nvidia0`
@@ -180,6 +186,7 @@ impl PciDriver for NvidiaGpuDriver {
             vram_rw,
             gsp_state,
             gsp_reset,
+            sec2_state,
         });
 
         // Crate-local logs (silent on x86; kept for when that's fixed / other archs).
@@ -292,6 +299,8 @@ pub struct GpuReport {
     pub gsp_state: Option<GspCoreState>,
     /// Outcome of the GSP falcon reset (P1.3). `Some` for GSP-capable chips.
     pub gsp_reset: Option<GspResetOutcome>,
+    /// SEC2 falcon state (P1.5c) — the engine that runs the GSP Booter.
+    pub sec2_state: Option<Sec2State>,
 }
 
 static REPORT: Mutex<Option<GpuReport>> = Mutex::new(None);

@@ -72,6 +72,11 @@ pub(crate) fn stage_firmware_dma(image: &[u8]) -> Option<StagedFirmware> {
     })
 }
 
+/// Base of the SEC2 falcon in BAR0 — the engine that runs the HS "Booter Load"
+/// ucode which sets up WPR2 and boots the GSP RISC-V core (P1.5c). Falcon v4
+/// register offsets are shared with the GSP falcon.
+const NV_PSEC2: usize = 0x0084_0000;
+
 /// Base of the GSP engine in the BAR0 MMIO aperture (`NV_PGSP`).
 const NV_PGSP: usize = 0x0011_0000;
 /// Base of the Peregrine RISC-V register window (`NV_PGSP + 0x1000`).
@@ -300,6 +305,48 @@ pub(crate) fn reset(regs: &IoMem) -> Option<GspResetOutcome> {
         post_cpuctl: regs.read_once::<u32>(FALCON_CPUCTL).ok()?,
         post_dmactl: regs.read_once::<u32>(FALCON_DMACTL).ok()?,
         post_riscv_cpuctl: regs.read_once::<u32>(RISCV_CPUCTL).ok()?,
+    })
+}
+
+/// State of the SEC2 falcon — the engine that runs the Booter (P1.5c). Read over
+/// BAR0 at `NV_PSEC2`; falcon v4 register offsets, same as the GSP falcon.
+#[derive(Debug, Clone, Copy)]
+pub struct Sec2State {
+    /// `FALCON_HWCFG2`.
+    pub hwcfg2: u32,
+    /// `FALCON_CPUCTL`.
+    pub cpuctl: u32,
+    /// SEC2 IMEM size (bytes) from `HWCFG[8:0]`.
+    pub imem_bytes: u32,
+    /// SEC2 DMEM size (bytes) from `HWCFG[17:9]`.
+    pub dmem_bytes: u32,
+    /// `FALCON_MAILBOX0` — the Booter's result register (0 = success after run).
+    pub mailbox0: u32,
+    /// `FALCON_MAILBOX1`.
+    pub mailbox1: u32,
+    /// `CPUCTL.HALTED` (bit 4) — the Booter signals done by halting.
+    pub halted: bool,
+}
+
+/// Read the SEC2 falcon's pre-boot state over BAR0 (**P1.5c** groundwork). Proves
+/// the SEC2 register block — where the Booter runs — is reachable, and reports
+/// its memory sizes and mailboxes. Read-only; safe. The full Booter DMA-load +
+/// run (into SEC2 IMEM/DMEM via `DMATRFCMD`, then `MAILBOX0/1`=WPR-meta phys,
+/// `CPUCTL.STARTCPU`, poll `HALTED` + `MAILBOX0==0`) is the next step.
+pub(crate) fn sec2_probe_state(regs: &IoMem) -> Option<Sec2State> {
+    let hwcfg = regs.read_once::<u32>(NV_PSEC2 + 0x108).ok()?;
+    let hwcfg2 = regs.read_once::<u32>(NV_PSEC2 + 0x0f4).ok()?;
+    let cpuctl = regs.read_once::<u32>(NV_PSEC2 + 0x100).ok()?;
+    let mailbox0 = regs.read_once::<u32>(NV_PSEC2 + 0x040).ok()?;
+    let mailbox1 = regs.read_once::<u32>(NV_PSEC2 + 0x044).ok()?;
+    Some(Sec2State {
+        hwcfg2,
+        cpuctl,
+        imem_bytes: (hwcfg & 0x1ff) * 256,
+        dmem_bytes: ((hwcfg >> 9) & 0x1ff) * 256,
+        mailbox0,
+        mailbox1,
+        halted: cpuctl & CPUCTL_HALTED_BIT != 0,
     })
 }
 

@@ -70,6 +70,13 @@ pub fn init() {
                         rst.post_cpuctl, rst.post_dmactl, rst.post_riscv_cpuctl,
                     );
                 }
+                if let Some(s2) = r.sec2_state {
+                    info!(
+                        "nvidia:   SEC2 falcon (P1.5c, Booter host): IMEM={}KiB DMEM={}KiB halted={} HWCFG2={:#010x} CPUCTL={:#010x} MBOX0={:#010x}",
+                        s2.imem_bytes / 1024, s2.dmem_bytes / 1024, s2.halted,
+                        s2.hwcfg2, s2.cpuctl, s2.mailbox0,
+                    );
+                }
             } else {
                 info!("nvidia:   pre-GSP architecture → enumerated + identified, but not drivable by nvidia-open");
             }
