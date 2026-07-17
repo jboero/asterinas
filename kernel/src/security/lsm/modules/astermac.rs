@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! astromac — a native, label-based Mandatory Access Control (MAC) module.
+//! astermac — a native, label-based Mandatory Access Control (MAC) module.
 //!
 //! This is the astrokube experiment in framekernel-native MAC: rather than
 //! porting SELinux's context/policy/AVC machinery, every process carries a small
@@ -37,12 +37,12 @@ use crate::{
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
 };
 
-pub static ASTROMAC_LSM: AstroMacLsm = AstroMacLsm;
+pub static ASTERMAC_LSM: AsterMacLsm = AsterMacLsm;
 
-/// The astromac MAC module.
-pub struct AstroMacLsm;
+/// The astermac MAC module.
+pub struct AsterMacLsm;
 
-/// astromac enforcement mode.
+/// astermac enforcement mode.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromInt)]
 pub enum MacMode {
@@ -55,23 +55,23 @@ pub enum MacMode {
     Enforcing = 2,
 }
 
-static ASTROMAC_MODE: AtomicU32 = AtomicU32::new(MacMode::Permissive as u32);
+static ASTERMAC_MODE: AtomicU32 = AtomicU32::new(MacMode::Permissive as u32);
 
-/// Returns the current astromac mode.
+/// Returns the current astermac mode.
 pub fn mode() -> MacMode {
-    MacMode::try_from(ASTROMAC_MODE.load(Ordering::Relaxed)).unwrap_or(MacMode::Permissive)
+    MacMode::try_from(ASTERMAC_MODE.load(Ordering::Relaxed)).unwrap_or(MacMode::Permissive)
 }
 
-/// Sets the astromac mode. Requires `CAP_SYS_ADMIN` in the init user namespace.
+/// Sets the astermac mode. Requires `CAP_SYS_ADMIN` in the init user namespace.
 pub fn set_mode(new_mode: MacMode) -> Result<()> {
     UserNamespace::get_init_singleton()
         .check_cap(CapSet::SYS_ADMIN, current_thread!().as_posix_thread().unwrap())?;
-    ASTROMAC_MODE.store(new_mode as u32, Ordering::Relaxed);
-    info!("[astromac] mode set to {:?}", new_mode);
+    ASTERMAC_MODE.store(new_mode as u32, Ordering::Relaxed);
+    info!("[astermac] mode set to {:?}", new_mode);
     Ok(())
 }
 
-impl LsmSignalAccessHook for AstroMacLsm {
+impl LsmSignalAccessHook for AsterMacLsm {
     fn on_signal_access(&self, context: &SignalAccessContext) -> Result<()> {
         let mode = mode();
         if mode == MacMode::Disabled {
@@ -91,12 +91,12 @@ impl LsmSignalAccessHook for AstroMacLsm {
             MacMode::Enforcing => {
                 return_errno_with_message!(
                     Errno::EPERM,
-                    "astromac: cross-tenant signal denied"
+                    "astermac: cross-tenant signal denied"
                 );
             }
             MacMode::Permissive => {
                 warn!(
-                    "[astromac] PERMISSIVE: would deny cross-tenant signal (sender tenant {}, target tenant {})",
+                    "[astermac] PERMISSIVE: would deny cross-tenant signal (sender tenant {}, target tenant {})",
                     sender, target
                 );
                 Ok(())
@@ -140,7 +140,7 @@ fn file_tenant(dev: u64, ino: u64) -> u32 {
     FILE_LABELS.lock().get(&(dev, ino)).copied().unwrap_or(0)
 }
 
-impl LsmFileAccessHook for AstroMacLsm {
+impl LsmFileAccessHook for AsterMacLsm {
     fn on_file_access(&self, context: &FileAccessContext) -> Result<()> {
         let mode = mode();
         if mode == MacMode::Disabled {
@@ -158,11 +158,11 @@ impl LsmFileAccessHook for AstroMacLsm {
 
         match mode {
             MacMode::Enforcing => {
-                return_errno_with_message!(Errno::EPERM, "astromac: cross-tenant file access denied");
+                return_errno_with_message!(Errno::EPERM, "astermac: cross-tenant file access denied");
             }
             MacMode::Permissive => {
                 warn!(
-                    "[astromac] PERMISSIVE: would deny cross-tenant file access (subject tenant {}, file tenant {}, ino {})",
+                    "[astermac] PERMISSIVE: would deny cross-tenant file access (subject tenant {}, file tenant {}, ino {})",
                     subject,
                     object,
                     context.ino()
@@ -205,7 +205,7 @@ fn ip_tenant(ipv4: u32) -> u32 {
     IP_LABELS.lock().get(&ipv4).copied().unwrap_or(0)
 }
 
-impl LsmSocketConnectHook for AstroMacLsm {
+impl LsmSocketConnectHook for AsterMacLsm {
     fn on_socket_connect(&self, context: &SocketConnectContext) -> Result<()> {
         let mode = mode();
         if mode == MacMode::Disabled {
@@ -224,12 +224,12 @@ impl LsmSocketConnectHook for AstroMacLsm {
             MacMode::Enforcing => {
                 return_errno_with_message!(
                     Errno::EPERM,
-                    "astromac: cross-tenant network connect denied"
+                    "astermac: cross-tenant network connect denied"
                 );
             }
             MacMode::Permissive => {
                 warn!(
-                    "[astromac] PERMISSIVE: would deny cross-tenant connect (subject tenant {}, dst tenant {})",
+                    "[astermac] PERMISSIVE: would deny cross-tenant connect (subject tenant {}, dst tenant {})",
                     subject, object
                 );
                 Ok(())
@@ -239,12 +239,12 @@ impl LsmSocketConnectHook for AstroMacLsm {
     }
 }
 
-// astromac does not gate alien access (ptrace); that stays with Yama.
-impl LsmAlienAccessHook for AstroMacLsm {}
+// astermac does not gate alien access (ptrace); that stays with Yama.
+impl LsmAlienAccessHook for AsterMacLsm {}
 
-impl LsmModule for AstroMacLsm {
+impl LsmModule for AsterMacLsm {
     fn name(&self) -> &'static str {
-        "astromac"
+        "astermac"
     }
 
     fn flags(&self) -> LsmFlags {

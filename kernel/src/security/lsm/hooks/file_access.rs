@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Hooks for file-access checks — the second astromac MAC domain.
+//! Hooks for file-access checks — the second astermac MAC domain.
 //!
 //! Mediates a labeled subject (a tenant) reading/writing/executing a file based
 //! on the file's own tenant label, independently of the discretionary uid/gid
@@ -42,7 +42,7 @@ impl FileAccessContext {
         }
     }
 
-    /// The astromac tenant label of the accessing thread (non-zero here; the
+    /// The astermac tenant label of the accessing thread (non-zero here; the
     /// caller skips the hook for unconfined tenant 0).
     pub const fn subject_tenant(&self) -> u32 {
         self.subject_tenant

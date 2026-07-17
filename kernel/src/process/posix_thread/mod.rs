@@ -118,7 +118,7 @@ pub struct PosixThread {
     /// preserved across execve.
     seccomp: crate::seccomp::SeccompState,
 
-    /// astromac tenant label for the native MAC experiment. 0 = unconfined (the
+    /// astermac tenant label for the native MAC experiment. 0 = unconfined (the
     /// default; unaffected by MAC, which keeps existing Kubernetes workloads
     /// working). A non-zero label marks the thread as belonging to a tenant, and
     /// the MAC policy restricts cross-tenant operations. Inherited on clone/fork.
@@ -360,12 +360,12 @@ impl PosixThread {
         &self.seccomp
     }
 
-    /// Returns this thread's astromac tenant label (0 = unconfined).
+    /// Returns this thread's astermac tenant label (0 = unconfined).
     pub fn mac_tenant(&self) -> u32 {
         self.mac_tenant.load(Ordering::Relaxed)
     }
 
-    /// Sets this thread's astromac tenant label.
+    /// Sets this thread's astermac tenant label.
     pub fn set_mac_tenant(&self, tenant: u32) {
         self.mac_tenant.store(tenant, Ordering::Relaxed);
     }

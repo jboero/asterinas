@@ -164,7 +164,7 @@ fn check_signal_perm(target: &PosixThread, ctx: &Context, signum: Option<SigNum>
         return Ok(());
     }
 
-    // Mandatory access control (astromac): a cross-tenant signal may be denied
+    // Mandatory access control (astermac): a cross-tenant signal may be denied
     // regardless of the discretionary checks below. This is checked first so MAC
     // can override DAC, as a mandatory policy must. It is a no-op for unlabeled
     // (tenant 0) processes, which is every process on an unmodified node.

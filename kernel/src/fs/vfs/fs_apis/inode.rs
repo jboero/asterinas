@@ -531,14 +531,14 @@ pub trait Inode: Any + FileOps + Send + Sync {
     /// Similar to Linux, using "fsuid" here allows setting filesystem permissions
     /// without changing the "normal" uids for other tasks.
     fn check_permission(&self, mut perm: Permission) -> Result<()> {
-        // astromac MAC (mandatory): a tenant-labeled subject accessing a file
+        // astermac MAC (mandatory): a tenant-labeled subject accessing a file
         // labeled for a different tenant may be denied regardless of the
         // discretionary checks below. The fast path is a single atomic load —
         // skipped entirely unless some file is labeled — and it never affects
         // unconfined (tenant 0) subjects, i.e. every process on an unmodified
         // node. This is checked first so MAC can override DAC, as a mandatory
         // policy must.
-        if crate::security::lsm::astromac::has_file_labels()
+        if crate::security::lsm::astermac::has_file_labels()
             && let Some(task) = Task::current()
             && let Some(thread) = task.as_posix_thread()
         {

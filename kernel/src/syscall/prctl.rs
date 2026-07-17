@@ -194,7 +194,7 @@ pub fn sys_prctl(
             crate::net::iface::mark_bridge_uplink(bridge_index);
         }
         PrctlCmd::PR_ASTERKUBE_SETTENANT(tenant) => {
-            // Assign the calling thread's astromac tenant label (multi-tenant
+            // Assign the calling thread's astermac tenant label (multi-tenant
             // MAC). Requires CAP_SYS_ADMIN — only a pod launcher labels pods.
             if !ctx
                 .posix_thread
@@ -204,20 +204,20 @@ pub fn sys_prctl(
             {
                 return_errno_with_message!(
                     Errno::EPERM,
-                    "setting an astromac tenant label requires CAP_SYS_ADMIN"
+                    "setting an astermac tenant label requires CAP_SYS_ADMIN"
                 );
             }
             ctx.posix_thread.set_mac_tenant(tenant);
         }
         PrctlCmd::PR_ASTERKUBE_MAC_MODE(mode) => {
-            // Set the global astromac enforcement mode. set_mode performs its own
+            // Set the global astermac enforcement mode. set_mode performs its own
             // CAP_SYS_ADMIN check against the init user namespace.
-            let mode = crate::security::lsm::astromac::MacMode::try_from(mode)
-                .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astromac mode"))?;
-            crate::security::lsm::astromac::set_mode(mode)?;
+            let mode = crate::security::lsm::astermac::MacMode::try_from(mode)
+                .map_err(|_| Error::with_message(Errno::EINVAL, "invalid astermac mode"))?;
+            crate::security::lsm::astermac::set_mode(mode)?;
         }
         PrctlCmd::PR_ASTERKUBE_LABEL_IP { ipv4, tenant } => {
-            // Assign (or clear, with tenant 0) the astromac tenant label of an
+            // Assign (or clear, with tenant 0) the astermac tenant label of an
             // IPv4 endpoint. Requires CAP_SYS_ADMIN.
             if !ctx
                 .posix_thread
@@ -230,10 +230,10 @@ pub fn sys_prctl(
                     "labeling an IP requires CAP_SYS_ADMIN"
                 );
             }
-            crate::security::lsm::astromac::label_ip(ipv4, tenant);
+            crate::security::lsm::astermac::label_ip(ipv4, tenant);
         }
         PrctlCmd::PR_ASTERKUBE_LABEL_FD { fd, tenant } => {
-            // Assign (or clear, with tenant 0) the astromac tenant label of the
+            // Assign (or clear, with tenant 0) the astermac tenant label of the
             // file referred to by `fd`. Requires CAP_SYS_ADMIN.
             if !ctx
                 .posix_thread
@@ -251,7 +251,7 @@ pub fn sys_prctl(
                 let file = get_file_fast!(&mut file_table, (fd as RawFileDesc).try_into()?);
                 file.path().metadata()
             };
-            crate::security::lsm::astromac::label_file(
+            crate::security::lsm::astermac::label_file(
                 metadata.container_dev_id.as_encoded_u64(),
                 metadata.ino,
                 tenant,
@@ -319,9 +319,9 @@ const PR_ASTERKUBE_MASQ: i32 = 0x4b55_424d; // "KUBM"
 /// orderly host poweroff is delivered to PID 1 as SIGINT for a graceful node
 /// drain. Called once by the init after the node is up; takes no arguments.
 const PR_ASTERKUBE_ACPI: i32 = 0x4b55_4143; // "KUAC"
-/// astrokube: set the calling thread's astromac tenant label (arg2 = tenant id).
+/// astrokube: set the calling thread's astermac tenant label (arg2 = tenant id).
 const PR_ASTERKUBE_SETTENANT: i32 = 0x4b55_544e; // "KUTN"
-/// astrokube: set the global astromac mode (arg2 = MacMode: 0/1/2).
+/// astrokube: set the global astermac mode (arg2 = MacMode: 0/1/2).
 const PR_ASTERKUBE_MAC_MODE: i32 = 0x4b55_4d4d; // "KUMM"
 /// astrokube: label the file at fd (arg2 = fd) with a tenant (arg3 = tenant).
 const PR_ASTERKUBE_LABEL_FD: i32 = 0x4b55_464c; // "KUFL"
