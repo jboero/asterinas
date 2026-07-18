@@ -238,6 +238,40 @@ pub fn net_ns_of_pid(pid: u32) -> Result<Arc<NetNamespace>> {
     Ok(proxy.net_ns().clone())
 }
 
+/// Resolves a network namespace from an open file descriptor referring to a
+/// namespace file (`/proc/<pid>/ns/net` or a bind-mounted netns).
+///
+/// This backs `IFLA_NET_NS_FD`: the standard CNI plugins (e.g. ptp/bridge) open
+/// the pod's network namespace as a file and pass it *by fd* rather than by pid,
+/// so a veth end must be placeable by fd. Resolution mirrors how `setns` turns an
+/// fd into a namespace: the file must be an `NsFile<NetNamespace>` from nsfs.
+pub fn net_ns_of_fd(fd: u32) -> Result<Arc<NetNamespace>> {
+    use crate::fs::{file::InodeHandle, pseudofs::NsFile};
+
+    let current = ostd::task::Task::current()
+        .ok_or_else(|| Error::with_message(Errno::ESRCH, "no current task for netns fd lookup"))?;
+    let thread_local = current
+        .as_thread_local()
+        .ok_or_else(|| Error::with_message(Errno::ESRCH, "no thread-local context"))?;
+    let raw: crate::fs::file::file_table::RawFileDesc = fd
+        .try_into()
+        .map_err(|_| Error::with_message(Errno::EBADF, "IFLA_NET_NS_FD out of range"))?;
+    let file = {
+        let file_table = thread_local.borrow_file_table();
+        let file_table_locked = file_table.unwrap().read();
+        file_table_locked.get_file(raw.try_into()?)?.clone()
+    };
+    let inode_handle = file.downcast_ref::<InodeHandle>().ok_or_else(|| {
+        Error::with_message(Errno::EINVAL, "IFLA_NET_NS_FD is not a namespace file")
+    })?;
+    let ns_file = inode_handle
+        .downcast_open_file::<NsFile<NetNamespace>>()?
+        .ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "IFLA_NET_NS_FD is not a network namespace")
+        })?;
+    Ok(ns_file.ns().clone())
+}
+
 /// Creates a veth pair and places each end into a network namespace, with no
 /// addresses assigned (addresses are configured separately via `RTM_NEWADDR`).
 ///

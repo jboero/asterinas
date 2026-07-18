@@ -16,11 +16,11 @@ pub fn sys_connect(
     let socket_addr = read_socket_addr_from_user(sockaddr_ptr, addr_len as _)?;
     debug!("fd = {sockfd}, socket_addr = {socket_addr:?}");
 
-    // astromac MAC (network): a tenant-labeled subject connecting to a
+    // astermac MAC (network): a tenant-labeled subject connecting to a
     // differently-labeled IPv4 endpoint may be denied. No-op unless some IP is
     // labeled and the subject is a non-zero tenant (so every unmodified node is
     // unaffected).
-    if crate::security::lsm::astromac::has_ip_labels()
+    if crate::security::lsm::astermac::has_ip_labels()
         && let crate::net::socket::util::SocketAddr::IPv4(addr, _) = &socket_addr
     {
         let subject_tenant = ctx.posix_thread.mac_tenant();

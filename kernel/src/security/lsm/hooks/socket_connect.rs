@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Hooks for socket connect — the third astromac MAC domain (network).
+//! Hooks for socket connect — the third astermac MAC domain (network).
 //!
 //! Mediates a labeled subject (a tenant) initiating a connection to a network
 //! endpoint based on the destination IP's tenant label. This is the cross-tenant
@@ -39,7 +39,7 @@ impl SocketConnectContext {
         }
     }
 
-    /// The astromac tenant label of the connecting thread (non-zero here; the
+    /// The astermac tenant label of the connecting thread (non-zero here; the
     /// caller skips the hook for unconfined tenant 0).
     pub const fn subject_tenant(&self) -> u32 {
         self.subject_tenant

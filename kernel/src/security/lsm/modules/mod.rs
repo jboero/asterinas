@@ -29,7 +29,7 @@
 //! mandatory modules plus the default optional stack are used.
 
 mod capability;
-pub mod astromac;
+pub mod astermac;
 pub mod yama;
 
 use spin::Once;
@@ -48,13 +48,13 @@ static MANDATORY_MODULES: [&'static dyn LsmModule; 1] = [&capability::CAPABILITY
 
 /// All LSM modules compiled into the kernel.
 static ALL_MODULES: [&'static dyn LsmModule; 3] =
-    [&capability::CAPABILITY_LSM, &yama::YAMA_LSM, &astromac::ASTROMAC_LSM];
+    [&capability::CAPABILITY_LSM, &yama::YAMA_LSM, &astermac::ASTERMAC_LSM];
 
 /// The fallback optional LSM stack used when no boot-time selector is specified.
-/// astromac is on by default but starts permissive (and is a no-op for
+/// astermac is on by default but starts permissive (and is a no-op for
 /// unlabeled processes), so it does not affect existing Kubernetes workloads.
 pub(super) static DEFAULT_OPTIONAL_MODULES: [&'static dyn LsmModule; 2] =
-    [&yama::YAMA_LSM, &astromac::ASTROMAC_LSM];
+    [&yama::YAMA_LSM, &astermac::ASTERMAC_LSM];
 
 static ALL_MODULES_BY_NAME: Once<BTreeMap<&'static str, &'static dyn LsmModule>> = Once::new();
 static ACTIVE_MODULES: Once<Box<[&'static dyn LsmModule]>> = Once::new();
