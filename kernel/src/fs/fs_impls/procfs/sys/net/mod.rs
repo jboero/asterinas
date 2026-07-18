@@ -2,7 +2,7 @@
 
 //! `/proc/sys/net` — networking sysctls.
 
-use self::netfilter::NetfilterDirOps;
+use self::{ipv4::Ipv4DirOps, netfilter::NetfilterDirOps};
 use crate::{
     fs::{
         file::{InodeType, mkmod},
@@ -18,6 +18,7 @@ use crate::{
     prelude::*,
 };
 
+mod ipv4;
 mod netfilter;
 
 /// Represents the inode at `/proc/sys/net`.
@@ -28,8 +29,10 @@ impl NetDirOps {
         ProcDir::new(Self, parent, mkmod!(a+rx))
     }
 
-    const STATIC_ENTRIES: &'static [StaticEntry] =
-        &[("netfilter", InodeType::Dir, NetfilterDirOps::new_inode)];
+    const STATIC_ENTRIES: &'static [StaticEntry] = &[
+        ("ipv4", InodeType::Dir, Ipv4DirOps::new_inode),
+        ("netfilter", InodeType::Dir, NetfilterDirOps::new_inode),
+    ];
 }
 
 impl ProcDirOps for NetDirOps {
