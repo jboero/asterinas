@@ -244,6 +244,7 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                                 let fb = aster_nvidia::read_fb_size();
                                 match (boot_desc.as_ref(), boot_img.as_ref(), bl_daddr, fb) {
                                     (Some(desc), Some(img), Some(bl), Some((fb_size, fb_raw))) => {
+                                        let mmu_lock = aster_nvidia::read_mmu_lock();
                                         let meta = aster_nvidia::GspFwWprMeta::populate(
                                             fb_size,
                                             rx.root_daddr as u64,
@@ -251,7 +252,9 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                                             bl as u64,
                                             img.len() as u64,
                                             desc,
+                                            mmu_lock.map(|(lo, _)| lo),
                                         );
+                                        info!("nvidia:   mmu_lock={:x?} vgaWorkspace@{:#x}", mmu_lock, meta.vga_workspace_offset);
                                         info!(
                                             "nvidia:   FB {:#x} ({} MB) [LOCAL_MEMORY_RANGE={:#010x}]; bootloader @{:#x} ({} B) code@{:#x} data@{:#x} manifest@{:#x} appVer={}",
                                             fb_size, fb_size >> 20, fb_raw, bl, img.len(),

@@ -365,6 +365,26 @@ pub(crate) fn read_fb_size(regs: &IoMem) -> Option<(u64, u32)> {
     Some((mag << (scale + 20), raw))
 }
 
+/// `NV_PFB_PRI_MMU_LOCK_ADDR_{LO,HI}` + its PLM (BAR0). If the VBIOS locked a
+/// region (top of FB), WPR2 must stay below `lo`. `addr = VAL[31:4] << 12`.
+const NV_PFB_PRI_MMU_LOCK_ADDR_LO: usize = 0x001f_a82c;
+const NV_PFB_PRI_MMU_LOCK_ADDR_HI: usize = 0x001f_a830;
+const NV_PFB_PRI_MMU_LOCK_ADDR_LO_PLM: usize = 0x001f_a7c8;
+
+/// Read the VBIOS MMU-lock region `[lo, hi)` if present + readable, else `None`
+/// (mirrors `memmgrReadMmuLock_GA100`). The WPR2 end is clamped below `lo`.
+pub(crate) fn read_mmu_lock(regs: &IoMem) -> Option<(u64, u64)> {
+    // Read protection must be enabled (level-0) for the lock values to be valid.
+    if regs.read_once::<u32>(NV_PFB_PRI_MMU_LOCK_ADDR_LO_PLM).ok()? & 1 == 0 {
+        return None;
+    }
+    let lo = regs.read_once::<u32>(NV_PFB_PRI_MMU_LOCK_ADDR_LO).ok()?;
+    let hi = regs.read_once::<u32>(NV_PFB_PRI_MMU_LOCK_ADDR_HI).ok()?;
+    let lock_lo = (((lo >> 4) & 0x0fff_ffff) as u64) << 12;
+    let lock_hi = (((hi >> 4) & 0x0fff_ffff) as u64) << 12;
+    (lock_hi > lock_lo).then_some((lock_lo, lock_hi))
+}
+
 /// The staged GSP RISC-V bootloader DMA buffer, kept alive for the life of the
 /// system so its guest-physical address stays valid for the Booter to DMA from.
 static STAGED_BOOTLOADER: Once<DmaCoherent> = Once::new();

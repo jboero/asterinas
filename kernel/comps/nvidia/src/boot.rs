@@ -229,6 +229,7 @@ impl GspFwWprMeta {
         bootloader_daddr: u64,
         bootloader_size: u64,
         desc: &RiscvUcodeDesc,
+        mmu_lock_lo: Option<u64>,
     ) -> Self {
         let mem_gb = align_up(fb_size, 1 << 30) >> 30;
         let fw_heap_size = OS_CARVEOUT_LIBOS3_BAREMETAL
@@ -242,7 +243,11 @@ impl GspFwWprMeta {
         m.fb_size = fb_size;
         m.vga_workspace_offset = fb_size - NV_PRAMIN_SIZE;
         m.vga_workspace_size = fb_size - m.vga_workspace_offset;
-        let vbios_reserved = m.vga_workspace_offset;
+        // The WPR2 end must stay below any VBIOS MMU-locked region.
+        let vbios_reserved = match mmu_lock_lo {
+            Some(lo) => lo.min(m.vga_workspace_offset),
+            None => m.vga_workspace_offset,
+        };
 
         m.size_of_radix3_elf = radix3_size;
         m.gsp_fw_wpr_end = align_down(vbios_reserved, WPR_ALIGNMENT); // - wprEndMargin(0)

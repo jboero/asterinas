@@ -82,6 +82,12 @@ pub fn read_fb_size() -> Option<(u64, u32)> {
     gsp::read_fb_size(REG_IO_MEM.get()?)
 }
 
+/// Read the VBIOS MMU-lock region `[lo,hi)` (WPR2 must stay below `lo`), if a GPU
+/// has been probed and the lock is present + readable. **P1.5c.**
+pub fn read_mmu_lock() -> Option<(u64, u64)> {
+    gsp::read_mmu_lock(REG_IO_MEM.get()?)
+}
+
 pub use crate::gsp::BooterOutcome;
 
 /// Run the SEC2 HS Booter to authenticate our WPR meta and bring up WPR2
