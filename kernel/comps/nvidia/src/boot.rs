@@ -189,7 +189,8 @@ impl RiscvUcodeDesc {
 const MB: u64 = 1 << 20;
 /// `WPR_ALIGNMENT = RM_PAGE_SIZE_128K`.
 const WPR_ALIGNMENT: u64 = 0x20000;
-/// `kgspGetFrtsSize_TU102` = 1 MB.
+/// `kgspGetFrtsSize_TU102` = 1 MB. (frtsSize=0 was tested on HW → still 0x91,
+/// so the FRTS region is not the gate; restored to the driver's real value.)
 const FRTS_SIZE: u64 = MB;
 /// `DRF_SIZE(NV_PRAMIN)` = 1 MB (top-of-FB VGA/PRAMIN workspace).
 const NV_PRAMIN_SIZE: u64 = MB;
