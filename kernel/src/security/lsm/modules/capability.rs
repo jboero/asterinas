@@ -85,7 +85,7 @@ impl LsmAlienAccessHook for CapabilityLsm {
     }
 }
 
-// The capability module does not participate in astromac's tenant hooks; the
+// The capability module does not participate in astermac's tenant hooks; the
 // default (permit) implementations apply.
 impl LsmSignalAccessHook for CapabilityLsm {}
 impl LsmFileAccessHook for CapabilityLsm {}

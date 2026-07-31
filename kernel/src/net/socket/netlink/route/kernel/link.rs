@@ -191,6 +191,7 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
 
     let mut primary_name: Option<&str> = None;
     let mut primary_ns_pid: Option<u32> = None;
+    let mut primary_ns_fd: Option<u32> = None;
     let mut master_index: Option<u32> = None;
     let mut kind: Option<&str> = None;
     let mut peer = None;
@@ -199,6 +200,7 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
         match attr {
             LinkAttr::Name(name) => primary_name = name.to_str().ok(),
             LinkAttr::NetNsPid(pid) => primary_ns_pid = Some(*pid),
+            LinkAttr::NetNsFd(fd) => primary_ns_fd = Some(*fd),
             LinkAttr::Master(index) => master_index = Some(*index),
             LinkAttr::LinkInfo(info) => {
                 kind = info.kind.as_ref().and_then(|k| k.to_str().ok());
@@ -247,13 +249,10 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
 
     let peer_ns = if let Some(pid) = peer.net_ns_pid {
         net_ns::net_ns_of_pid(pid)?
-    } else if peer.net_ns_fd.is_some() {
-        // Placing the peer via IFLA_NET_NS_FD requires resolving a namespace fd
-        // in the caller's file table; use IFLA_NET_NS_PID for now.
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "placing a veth peer by IFLA_NET_NS_FD is not yet supported; use IFLA_NET_NS_PID"
-        );
+    } else if let Some(fd) = peer.net_ns_fd {
+        // The standard CNI plugins pass the peer's target namespace by fd
+        // (IFLA_NET_NS_FD), not by pid — resolve it from the caller's file table.
+        net_ns::net_ns_of_fd(fd)?
     } else {
         current_ns.clone()
     };
@@ -276,9 +275,12 @@ pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
         return Ok(Vec::new());
     }
 
-    let primary_ns = match primary_ns_pid {
-        Some(pid) => net_ns::net_ns_of_pid(pid)?,
-        None => current_ns.clone(),
+    let primary_ns = if let Some(pid) = primary_ns_pid {
+        net_ns::net_ns_of_pid(pid)?
+    } else if let Some(fd) = primary_ns_fd {
+        net_ns::net_ns_of_fd(fd)?
+    } else {
+        current_ns.clone()
     };
 
     net_ns::create_veth_pair(

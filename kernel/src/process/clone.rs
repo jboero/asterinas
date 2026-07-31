@@ -486,7 +486,7 @@ fn clone_child_task(
     };
 
     // Inherit the parent thread's seccomp policy (the filters are shared `Arc`s)
-    // and astromac tenant label.
+    // and astermac tenant label.
     if let Some(child_pt) = child_task.as_posix_thread() {
         child_pt.seccomp().inherit_from(ctx.posix_thread.seccomp());
         child_pt.set_mac_tenant(ctx.posix_thread.mac_tenant());
@@ -666,7 +666,7 @@ fn clone_child_process(
         )
     };
 
-    // Inherit the parent thread's seccomp policy and astromac tenant label into
+    // Inherit the parent thread's seccomp policy and astermac tenant label into
     // the new process's main thread (fork keeps the parent's policy).
     let child_main = child.main_thread();
     if let Some(child_pt) = child_main.as_posix_thread() {

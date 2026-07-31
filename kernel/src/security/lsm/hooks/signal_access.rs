@@ -4,7 +4,7 @@
 //!
 //! This is the first Mandatory Access Control (MAC) hook point in astrokube: it
 //! lets an LSM module gate one process signaling another based on a security
-//! label (the astromac tenant), independently of the discretionary uid/CAP_KILL
+//! label (the astermac tenant), independently of the discretionary uid/CAP_KILL
 //! checks. It is the cross-tenant isolation primitive for the multi-tenant
 //! security posture.
 
@@ -36,12 +36,12 @@ impl SignalAccessContext {
         }
     }
 
-    /// The astromac tenant label of the signal sender (0 = unconfined).
+    /// The astermac tenant label of the signal sender (0 = unconfined).
     pub const fn sender_tenant(&self) -> u32 {
         self.sender_tenant
     }
 
-    /// The astromac tenant label of the signal target (0 = unconfined).
+    /// The astermac tenant label of the signal target (0 = unconfined).
     pub const fn target_tenant(&self) -> u32 {
         self.target_tenant
     }

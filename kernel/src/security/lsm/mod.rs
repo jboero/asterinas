@@ -17,8 +17,8 @@ pub mod yama {
     pub use super::modules::yama::{YamaScope, get_scope, set_scope};
 }
 
-pub mod astromac {
-    pub use super::modules::astromac::{
+pub mod astermac {
+    pub use super::modules::astermac::{
         MacMode, has_file_labels, has_ip_labels, label_file, label_ip, set_mode,
     };
 }
