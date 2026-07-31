@@ -119,6 +119,9 @@ pub fn run_booter(
     meta: &GspFwWprMeta,
 ) -> Option<BooterOutcome> {
     let regs = REG_IO_MEM.get()?;
+    // Arm the GSP RISC-V core (reset-into-RISC-V, BCR valid) before the Booter —
+    // kgspBootstrap does this first, and the Booter expects it (else MAILBOX0!=0).
+    gsp::reset_gsp_into_riscv(regs);
     // Booter HS header: 9 little-endian u32. BootFromHs uses the app-code region
     // for IMEM and the os-data region for DMEM.
     let h = |i: usize| -> Option<u32> {

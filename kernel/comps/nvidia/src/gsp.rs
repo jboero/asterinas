@@ -308,6 +308,41 @@ pub(crate) fn reset(regs: &IoMem) -> Option<GspResetOutcome> {
     })
 }
 
+/// GSP falcon `BCR_CTRL` (in the RISC-V register window). `0x111` =
+/// `CORE_SELECT_RISCV | VALID | BRFETCH`.
+const NV_PGSP_BCR_CTRL: usize = NV_PRISCV + 0x668;
+
+/// Reset the GSP falcon **into RISC-V mode** and arm its BROM, mirroring
+/// `kflcnResetIntoRiscv_GA102`. `kgspBootstrap` does this *before* running the
+/// SEC2 Booter — the Booter expects the GSP RISC-V core armed (BCR valid) so it
+/// can release it. Without this the booter rejects the boot (MAILBOX0!=0).
+pub(crate) fn reset_gsp_into_riscv(regs: &IoMem) {
+    // Pre-reset wait on HWCFG2.RESET_READY (non-fatal).
+    for _ in 0..100_000 {
+        if regs.read_once::<u32>(FALCON_HWCFG2).unwrap_or(0) & HWCFG2_RESET_READY != 0 {
+            break;
+        }
+    }
+    // Engine reset toggle with propagation delay.
+    let _ = regs.write_once(FALCON_ENGINE, &ENGINE_RESET);
+    for _ in 0..RESET_PROPAGATION_READS {
+        let _ = regs.read_once::<u32>(FALCON_ENGINE);
+    }
+    let _ = regs.write_once(FALCON_ENGINE, &0u32);
+    for _ in 0..RESET_PROPAGATION_READS {
+        let _ = regs.read_once::<u32>(FALCON_ENGINE);
+    }
+    // Wait for scrubbing (HWCFG2.MEM_SCRUBBING bit 12 == 0).
+    const MEM_SCRUBBING: u32 = 1 << 12;
+    for _ in 0..1_000_000 {
+        if regs.read_once::<u32>(FALCON_HWCFG2).unwrap_or(MEM_SCRUBBING) & MEM_SCRUBBING == 0 {
+            break;
+        }
+    }
+    // Arm the RISC-V BROM: BCR_CTRL = CORE_SELECT_RISCV | VALID | BRFETCH.
+    let _ = regs.write_once(NV_PGSP_BCR_CTRL, &0x111u32);
+}
+
 /// State of the SEC2 falcon — the engine that runs the Booter (P1.5c). Read over
 /// BAR0 at `NV_PSEC2`; falcon v4 register offsets, same as the GSP falcon.
 #[derive(Debug, Clone, Copy)]
