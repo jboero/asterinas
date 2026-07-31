@@ -156,3 +156,124 @@ pub fn build_radix3(fw_daddr: usize, fw_size: usize) -> Option<Radix3> {
         verified,
     })
 }
+
+/// The WPR-relevant fields of `RM_RISCV_UCODE_DESC` (the 84-byte descriptor
+/// shipped with the GSP bootloader, `gsprmboot.desc`), decoded from its
+/// little-endian `u32` array (`rmRiscvUcode.h`; this build is version 5).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RiscvUcodeDesc {
+    pub app_version: u32,
+    pub manifest_offset: u32,
+    pub monitor_data_offset: u32,
+    pub monitor_code_offset: u32,
+}
+
+impl RiscvUcodeDesc {
+    /// Decode from the raw 84-byte descriptor. Field indices per `RM_RISCV_UCODE_DESC`:
+    /// `appVersion`=7, `manifestOffset`=8, `monitorDataOffset`=10, `monitorCodeOffset`=12.
+    pub fn parse(desc: &[u8]) -> Option<Self> {
+        let u = |i: usize| -> Option<u32> {
+            let o = i * 4;
+            Some(u32::from_le_bytes(desc.get(o..o + 4)?.try_into().ok()?))
+        };
+        Some(Self {
+            app_version: u(7)?,
+            manifest_offset: u(8)?,
+            monitor_data_offset: u(10)?,
+            monitor_code_offset: u(12)?,
+        })
+    }
+}
+
+// --- WPR2 / GSP-FW-heap layout constants (gsp_init_args.h, gsp_fw_heap.h) ---
+const MB: u64 = 1 << 20;
+/// `WPR_ALIGNMENT = RM_PAGE_SIZE_128K`.
+const WPR_ALIGNMENT: u64 = 0x20000;
+/// `kgspGetFrtsSize_TU102` = 1 MB.
+const FRTS_SIZE: u64 = MB;
+/// `DRF_SIZE(NV_PRAMIN)` = 1 MB (top-of-FB VGA/PRAMIN workspace).
+const NV_PRAMIN_SIZE: u64 = MB;
+/// `GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS3_BAREMETAL` (22 MB).
+const OS_CARVEOUT_LIBOS3_BAREMETAL: u64 = 22 * MB;
+/// `GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X` (8 MB, Turing..Ada).
+const BASE_RM_SIZE_TU10X: u64 = 8 * MB;
+/// `GSP_FW_HEAP_PARAM_SIZE_PER_GB` (96 KB per GB of FB).
+const HEAP_PARAM_SIZE_PER_GB: u64 = 96 << 10;
+/// `GSP_FW_HEAP_PARAM_CLIENT_ALLOC_SIZE` (48 KB × 2048 channels).
+const CLIENT_ALLOC_SIZE: u64 = (48 << 10) * 2048;
+/// Non-WPR heap estimate — refine against the Booter's MAILBOX0 on hardware.
+const NON_WPR_HEAP_SIZE: u64 = MB;
+
+const fn align_down(v: u64, a: u64) -> u64 {
+    v & !(a - 1)
+}
+const fn align_up(v: u64, a: u64) -> u64 {
+    (v + a - 1) & !(a - 1)
+}
+
+impl GspFwWprMeta {
+    /// Populate the full WPR2 FB layout the SEC2 Booter reads, computed top-down
+    /// from the usable FB size — a Rust transcription of
+    /// `kgspPopulateWprMeta_TU102`. **P1.5c.**
+    ///
+    /// Simplifying assumptions for the headless-passthrough compute case (each
+    /// verified/refined against the Booter's `MAILBOX0` error code on hardware):
+    /// no display VGA-workspace base and no VBIOS MMU-lock (so
+    /// `vbiosReservedOffset == vgaWorkspaceOffset`), and `wprEndMargin == 0`
+    /// (registry default on the first populate).
+    #[allow(clippy::too_many_arguments)]
+    pub fn populate(
+        fb_size: u64,
+        radix3_root: u64,
+        radix3_size: u64,
+        bootloader_daddr: u64,
+        bootloader_size: u64,
+        desc: &RiscvUcodeDesc,
+    ) -> Self {
+        let mem_gb = align_up(fb_size, 1 << 30) >> 30;
+        let fw_heap_size = OS_CARVEOUT_LIBOS3_BAREMETAL
+            + BASE_RM_SIZE_TU10X
+            + align_up(HEAP_PARAM_SIZE_PER_GB * mem_gb, MB)
+            + align_up(CLIENT_ALLOC_SIZE, MB);
+        let wpr_meta_sz = align_up(core::mem::size_of::<Self>() as u64, MB); // -> 1 MB
+        let non_wpr_heap = align_up(NON_WPR_HEAP_SIZE, MB);
+
+        let mut m = Self::new();
+        m.fb_size = fb_size;
+        m.vga_workspace_offset = fb_size - NV_PRAMIN_SIZE;
+        m.vga_workspace_size = fb_size - m.vga_workspace_offset;
+        let vbios_reserved = m.vga_workspace_offset;
+
+        m.size_of_radix3_elf = radix3_size;
+        m.gsp_fw_wpr_end = align_down(vbios_reserved, WPR_ALIGNMENT); // - wprEndMargin(0)
+        m.frts_size = FRTS_SIZE;
+        m.frts_offset = m.gsp_fw_wpr_end - m.frts_size;
+        m.size_of_bootloader = bootloader_size;
+        m.boot_bin_offset = align_down(m.frts_offset - m.size_of_bootloader, 0x1000);
+        m.gsp_fw_offset = align_down(m.boot_bin_offset - m.size_of_radix3_elf, 0x10000);
+
+        m.gsp_fw_heap_offset = align_down(m.gsp_fw_offset - fw_heap_size, MB);
+        m.gsp_fw_heap_size = align_down(m.gsp_fw_offset - m.gsp_fw_heap_offset, MB);
+        m.gsp_fw_wpr_start = m.gsp_fw_heap_offset - wpr_meta_sz;
+        m.non_wpr_heap_size = non_wpr_heap;
+        m.non_wpr_heap_offset = m.gsp_fw_wpr_start - m.non_wpr_heap_size;
+        m.gsp_fw_rsvd_start = m.non_wpr_heap_offset;
+
+        m.sysmem_addr_of_radix3_elf = radix3_root;
+        m.sysmem_addr_of_bootloader = bootloader_daddr;
+        m.bootloader_code_offset = desc.monitor_code_offset as u64;
+        m.bootloader_data_offset = desc.monitor_data_offset as u64;
+        m.bootloader_manifest_offset = desc.manifest_offset as u64;
+        m.boot_count = 0;
+        m.verified = 0;
+        m
+    }
+
+    /// The raw 256 bytes of this descriptor, for DMA-staging to the Booter.
+    pub fn as_bytes(&self) -> &[u8] {
+        // Safety: `GspFwWprMeta` is `#[repr(C)]`, 256 bytes, all-POD fields.
+        unsafe {
+            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
+        }
+    }
+}

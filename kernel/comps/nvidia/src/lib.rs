@@ -42,7 +42,7 @@ use component::{ComponentInitError, init_component};
 use ostd::{bus::BusProbeError, io::IoMem, mm::VmIoOnce};
 
 use crate::chip::ChipInfo;
-pub use crate::boot::{GspFwWprMeta, Radix3};
+pub use crate::boot::{GspFwWprMeta, Radix3, RiscvUcodeDesc};
 pub use crate::fw::FwContainer;
 pub use crate::gsp::{GspCoreState, GspResetOutcome, Sec2State, StagedFirmware};
 
@@ -68,6 +68,75 @@ pub fn parse_firmware(blob: &[u8]) -> Option<FwContainer> {
 /// GPU-visible (guest-physical) address for the GSP boot to DMA from. **P1.5a.**
 pub fn stage_firmware(image: &[u8]) -> Option<StagedFirmware> {
     gsp::stage_firmware_dma(image)
+}
+
+/// Stage the GSP RISC-V bootloader image into DMA-coherent sysmem; returns its
+/// GPU-visible address for `GspFwWprMeta.sysmem_addr_of_bootloader`. **P1.5c.**
+pub fn stage_bootloader(image: &[u8]) -> Option<usize> {
+    gsp::stage_bootloader_dma(image)
+}
+
+/// Read the GPU's usable framebuffer size (bytes) + raw range register from
+/// BAR0, if a GPU has been probed. Drives the WPR2 layout. **P1.5c.**
+pub fn read_fb_size() -> Option<(u64, u32)> {
+    gsp::read_fb_size(REG_IO_MEM.get()?)
+}
+
+pub use crate::gsp::BooterOutcome;
+
+/// Run the SEC2 HS Booter to authenticate our WPR meta and bring up WPR2
+/// (**P1.5c**). Given the raw booter blobs (`booter_load.{img,sig,hdr}`), the
+/// patch metadata (`patch_loc`, `ucode_id`, `engine_id`, `num_sigs`), and the
+/// populated `GspFwWprMeta`: select the fuse-matched signature, patch it into the
+/// image, DMA-stage the image + meta, and run the booter. `MAILBOX0 == 0` (and
+/// `verified == 0xa0a0…` written back into the meta in FB) means success.
+#[allow(clippy::too_many_arguments)]
+pub fn run_booter(
+    booter_img: &[u8],
+    booter_sig: &[u8],
+    booter_hdr: &[u8],
+    patch_loc: u32,
+    ucode_id: u32,
+    engine_id: u32,
+    num_sigs: u32,
+    meta: &GspFwWprMeta,
+) -> Option<BooterOutcome> {
+    let regs = REG_IO_MEM.get()?;
+    // Booter HS header: 9 little-endian u32. BootFromHs uses the app-code region
+    // for IMEM and the os-data region for DMEM.
+    let h = |i: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(booter_hdr.get(i * 4..i * 4 + 4)?.try_into().ok()?))
+    };
+    let code_offset = h(5)?; // appCodeOffset -> imemVa
+    let imem_size = h(6)?; // appCodeSize
+    let data_offset = h(2)?; // osDataOffset
+    let dmem_size = h(3)?; // osDataSize
+    let imem_va = code_offset;
+
+    // Select the fuse-matched signature and patch it into a private copy of the
+    // image at `patch_loc` (`s_patchBooterUcodeSignature`).
+    let fuse = gsp::read_ucode_fuse_version(regs, ucode_id);
+    let sig_size = booter_sig.len() / num_sigs.max(1) as usize;
+    let sig_index = (num_sigs.saturating_sub(1)).saturating_sub(fuse) as usize;
+    let mut patched = booter_img.to_vec();
+    let (ploc, sstart) = (patch_loc as usize, sig_index * sig_size);
+    patched
+        .get_mut(ploc..ploc + sig_size)?
+        .copy_from_slice(booter_sig.get(sstart..sstart + sig_size)?);
+
+    let booter_phys = gsp::stage_booter_image(&patched)? as u64;
+    let meta_phys = gsp::stage_wpr_meta(meta.as_bytes())? as u64;
+    let hs_sig_dmem = patch_loc - data_offset;
+
+    ostd::info!(
+        "  booter: fuse_ver={} sig_idx={}/{} sigSz={} imem@{:#x} sz={:#x} dmem@{:#x} sz={:#x} hsSig@{:#x} img@{:#x} meta@{:#x}",
+        fuse, sig_index, num_sigs, sig_size, imem_va, imem_size, data_offset, dmem_size,
+        hs_sig_dmem, booter_phys, meta_phys,
+    );
+    gsp::run_booter(
+        regs, booter_phys, imem_va, imem_size, code_offset, data_offset, dmem_size,
+        hs_sig_dmem, ucode_id, engine_id, meta_phys,
+    )
 }
 
 /// PCI vendor ID assigned to NVIDIA Corporation.

@@ -350,6 +350,300 @@ pub(crate) fn sec2_probe_state(regs: &IoMem) -> Option<Sec2State> {
     })
 }
 
+/// `NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE` (BAR0) — encodes usable FB size:
+/// `LOWER_MAG` in `[27:4]`, `LOWER_SCALE` in `[3:0]`; `fbSize = MAG << (SCALE +
+/// 20)`. Mirrors `kmemsysReadUsableFbSize_GP102` (Ampere inherits the offset).
+const NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE: usize = 0x0010_0ce0;
+
+/// Read the GPU's usable framebuffer size (bytes) from BAR0, returning the
+/// decoded size and the raw register (for logging). The WPR2 layout (P1.5c) is
+/// computed top-down from this. Read-only; safe.
+pub(crate) fn read_fb_size(regs: &IoMem) -> Option<(u64, u32)> {
+    let raw = regs.read_once::<u32>(NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE).ok()?;
+    let mag = ((raw >> 4) & 0x00ff_ffff) as u64; // LOWER_MAG [27:4]
+    let scale = (raw & 0xf) as u64; // LOWER_SCALE [3:0]
+    Some((mag << (scale + 20), raw))
+}
+
+/// The staged GSP RISC-V bootloader DMA buffer, kept alive for the life of the
+/// system so its guest-physical address stays valid for the Booter to DMA from.
+static STAGED_BOOTLOADER: Once<DmaCoherent> = Once::new();
+
+/// Stage the GSP RISC-V bootloader image (`gsprmboot.img`) into a DMA-coherent
+/// sysmem buffer and return its GPU-visible (guest-physical) address — this goes
+/// into `GspFwWprMeta.sysmem_addr_of_bootloader`. **P1.5c.**
+pub(crate) fn stage_bootloader_dma(image: &[u8]) -> Option<usize> {
+    if image.is_empty() {
+        return None;
+    }
+    let nframes = image.len().div_ceil(PAGE_SIZE);
+    let dma = DmaCoherent::alloc(nframes, true).ok()?;
+    dma.write_bytes(0, image).ok()?;
+    let daddr = dma.daddr();
+    STAGED_BOOTLOADER.call_once(|| dma);
+    Some(daddr)
+}
+
+// --- SEC2 Booter execution (P1.5c): DMA the signed HS ucode into SEC2, run it
+// against our WPR meta, and check it authenticated (MAILBOX0==0). Register
+// offsets from `ampere/ga102/dev_falcon_v4.h` / `dev_falcon_second_pri.h` /
+// `dev_fbif_v4.h`; sequence from `kgspExecuteHsFalcon_GA102`. ---
+const NV_PSEC2_FBIF: usize = NV_PSEC2 + 0x600; // FBIF register block
+const NV_PSEC2_BROM: usize = NV_PSEC2 + 0x1000; // NV_FALCON2_SEC (BROM/riscv regs)
+// Falcon v4 register offsets (add NV_PSEC2).
+const F_MAILBOX0: usize = 0x040;
+const F_MAILBOX1: usize = 0x044;
+const F_CPUCTL: usize = 0x100;
+const F_BOOTVEC: usize = 0x104;
+const F_DMACTL: usize = 0x10c;
+const F_DMATRFBASE: usize = 0x110;
+const F_DMATRFMOFFS: usize = 0x114;
+const F_DMATRFCMD: usize = 0x118;
+const F_DMATRFFBOFFS: usize = 0x11c;
+const F_DMATRFBASE1: usize = 0x128;
+const F_CPUCTL_ALIAS: usize = 0x130;
+const F_ENGINE: usize = 0x3c0;
+// FBIF (add NV_PSEC2_FBIF).
+const FBIF_TRANSCFG0: usize = 0x00;
+const FBIF_CTL: usize = 0x24;
+// BROM (add NV_PSEC2_BROM).
+const BROM_MOD_SEL: usize = 0x180;
+const BROM_CURR_UCODE_ID: usize = 0x198;
+const BROM_ENGIDMASK: usize = 0x19c;
+const BROM_PARAADDR0: usize = 0x210;
+// Field bits.
+const DMATRFCMD_FULL: u32 = 1 << 0;
+const DMATRFCMD_IDLE: u32 = 1 << 1;
+const CPUCTL_STARTCPU: u32 = 1 << 1;
+const CPUCTL_ALIAS_EN: u32 = 1 << 6;
+/// DMA command for IMEM: `SIZE_256B(6<<8) | IMEM(1<<4) | SEC(1<<2)`.
+const IMEM_DMA_CMD: u32 = (6 << 8) | (1 << 4) | (1 << 2);
+/// DMA command for DMEM: `SIZE_256B` only (non-secure, no dmtag; dmemVa invalid).
+const DMEM_DMA_CMD: u32 = 6 << 8;
+/// Falcon DMA block size (`FLCN_BLK_ALIGNMENT`).
+const FLCN_BLK: usize = 256;
+/// `NV_FUSE_OPT_FPF_SEC2_UCODE1_VERSION` — per-ucode fuse version array (BAR0).
+const NV_FUSE_OPT_FPF_SEC2_UCODE1_VERSION: usize = 0x0082_4140;
+
+/// Read the SEC2 ucode fuse version for `ucode_id` (`ksec2ReadUcodeFuseVersion_GA100`):
+/// the fuse is a thermometer code; version = highest-set-bit index + 1 (0 if unset).
+pub(crate) fn read_ucode_fuse_version(regs: &IoMem, ucode_id: u32) -> u32 {
+    let idx = ucode_id.saturating_sub(1) as usize;
+    let v = regs
+        .read_once::<u32>(NV_FUSE_OPT_FPF_SEC2_UCODE1_VERSION + 4 * idx)
+        .unwrap_or(0);
+    if v == 0 {
+        0
+    } else {
+        (31 - v.leading_zeros()) + 1
+    }
+}
+
+/// The signed, patched SEC2 booter image, DMA-staged so SEC2 can fetch it.
+static STAGED_BOOTER: Once<DmaCoherent> = Once::new();
+/// The DMA-staged `GspFwWprMeta` the booter reads (its phys addr goes in MAILBOX).
+static STAGED_META: Once<DmaCoherent> = Once::new();
+
+/// Stage an arbitrary byte image into a fresh DMA-coherent buffer and return its
+/// guest-physical address. Used for the patched booter image and the WPR meta.
+fn stage_bytes(store: &Once<DmaCoherent>, bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let nframes = bytes.len().div_ceil(PAGE_SIZE);
+    let dma = DmaCoherent::alloc(nframes, true).ok()?;
+    dma.write_bytes(0, bytes).ok()?;
+    let daddr = dma.daddr();
+    store.call_once(|| dma);
+    Some(daddr)
+}
+
+/// Stage the patched booter image (SEC2 will DMA its IMEM/DMEM from here).
+pub(crate) fn stage_booter_image(image: &[u8]) -> Option<usize> {
+    stage_bytes(&STAGED_BOOTER, image)
+}
+/// Stage the 256-byte `GspFwWprMeta` for the booter; returns its phys address.
+pub(crate) fn stage_wpr_meta(meta_bytes: &[u8]) -> Option<usize> {
+    stage_bytes(&STAGED_META, meta_bytes)
+}
+
+/// The result of running the SEC2 Booter.
+#[derive(Debug, Clone, Copy)]
+pub struct BooterOutcome {
+    /// `MAILBOX0` after halt — **0 == success** (WPR2 set up); nonzero = error code.
+    pub mailbox0: u32,
+    pub mailbox1: u32,
+    /// The falcon halted (booter finished) within the timeout.
+    pub halted: bool,
+    /// `WPR2_ADDR_HI` read-back (nonzero once the booter brought WPR2 up).
+    pub wpr2_hi: u32,
+    /// `CPUCTL` after the SEC2 reset (diagnostic: `0xbadf…` = still PRI-locked).
+    pub cpuctl_reset: u32,
+    /// `CPUCTL` after issuing STARTCPU (diagnostic).
+    pub cpuctl_start: u32,
+}
+
+/// `NV_PFB_PRI_MMU_WPR2_ADDR_HI` (BAR0) — nonzero once the booter sets up WPR2.
+const NV_PFB_PRI_MMU_WPR2_ADDR_HI: usize = 0x001f_a828;
+
+fn dma_wait_not_full(regs: &IoMem) {
+    for _ in 0..1_000_000 {
+        if regs.read_once::<u32>(NV_PSEC2 + F_DMATRFCMD).unwrap_or(DMATRFCMD_FULL) & DMATRFCMD_FULL
+            == 0
+        {
+            return;
+        }
+    }
+}
+
+/// DMA `size` bytes from sysmem `src_phys` into the SEC2 falcon IMEM/DMEM,
+/// mirroring `s_dmaTransfer_GA102` (256-byte blocks, BASE/MOFFS/FBOFFS/CMD).
+fn sec2_dma(regs: &IoMem, mut dest: u32, mut mem_off: u32, src_phys: u64, size: usize, cmd: u32) {
+    dma_wait_not_full(regs);
+    let base = src_phys >> 8;
+    let _ = regs.write_once(NV_PSEC2 + F_DMATRFBASE, &((base & 0xffff_ffff) as u32));
+    let _ = regs.write_once(NV_PSEC2 + F_DMATRFBASE1, &(((base >> 32) as u32) & 0x1ff));
+    let mut xfer = 0usize;
+    while xfer < size {
+        dma_wait_not_full(regs);
+        let _ = regs.write_once(NV_PSEC2 + F_DMATRFMOFFS, &(dest & 0x00ff_ffff));
+        let _ = regs.write_once(NV_PSEC2 + F_DMATRFFBOFFS, &mem_off);
+        let _ = regs.write_once(NV_PSEC2 + F_DMATRFCMD, &cmd);
+        xfer += FLCN_BLK;
+        dest += FLCN_BLK as u32;
+        mem_off += FLCN_BLK as u32;
+    }
+    for _ in 0..1_000_000 {
+        if regs.read_once::<u32>(NV_PSEC2 + F_DMATRFCMD).unwrap_or(0) & DMATRFCMD_IDLE != 0 {
+            break;
+        }
+    }
+}
+
+/// Reset the SEC2 falcon engine (`kflcnReset`) into a clean state before loading
+/// the Booter. Falcon `ENGINE.RESET` toggle with the propagation delay.
+fn sec2_reset(regs: &IoMem) {
+    let _ = regs.write_once(NV_PSEC2 + F_ENGINE, &ENGINE_RESET);
+    for _ in 0..RESET_PROPAGATION_READS {
+        let _ = regs.read_once::<u32>(NV_PSEC2 + F_ENGINE);
+    }
+    let _ = regs.write_once(NV_PSEC2 + F_ENGINE, &0u32);
+    for _ in 0..RESET_PROPAGATION_READS {
+        let _ = regs.read_once::<u32>(NV_PSEC2 + F_ENGINE);
+    }
+    // Wait for reset to finish: HWCFG2.MEM_SCRUBBING (bit 12) == 0
+    // (kflcnWaitForResetToFinish).
+    const HWCFG2_MEM_SCRUBBING: u32 = 1 << 12;
+    for _ in 0..1_000_000 {
+        if regs.read_once::<u32>(NV_PSEC2 + 0xf4).unwrap_or(HWCFG2_MEM_SCRUBBING) & HWCFG2_MEM_SCRUBBING
+            == 0
+        {
+            break;
+        }
+    }
+    // Switch the SEC2 core to FALCON mode — this *releases the priv lockdown*
+    // (kflcnSwitchToFalcon_GA102). Write BCR_CTRL.CORE_SELECT=FALCON (=0), then
+    // poll VALID (bit 0). Without this the falcon front-end stays 0xbadf-locked
+    // and every control write (incl. STARTCPU) is dropped.
+    let bcr = NV_PSEC2_BROM + 0x668; // NV_PRISCV_RISCV_BCR_CTRL
+    let _ = regs.write_once(bcr, &0u32);
+    for _ in 0..1_000_000 {
+        if regs.read_once::<u32>(bcr).unwrap_or(0) & 1 != 0 {
+            break;
+        }
+    }
+}
+
+/// Run the SEC2 HS Booter (P1.5c): reset SEC2, disable ctx + point FBIF at
+/// physical coherent sysmem, DMA the (already signature-patched) booter image's
+/// IMEM/DMEM in, program the BROM PKC params, hand it the WPR-meta phys via the
+/// mailboxes, start it, and wait for halt. `MAILBOX0 == 0` means it authenticated
+/// and set up WPR2. Mirrors `kgspExecuteHsFalcon_GA102`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_booter(
+    regs: &IoMem,
+    booter_phys: u64,
+    imem_va: u32,
+    imem_size: u32,
+    code_offset: u32,
+    data_offset: u32,
+    dmem_size: u32,
+    hs_sig_dmem_addr: u32,
+    ucode_id: u32,
+    engine_id_mask: u32,
+    wpr_meta_phys: u64,
+) -> Option<BooterOutcome> {
+    sec2_reset(regs);
+
+    // Disable ctx req: FBIF_CTL.ALLOW_PHYS_NO_CTX = ALLOW; DMACTL = 0.
+    let ctl = regs.read_once::<u32>(NV_PSEC2_FBIF + FBIF_CTL).ok()? | (1 << 7);
+    regs.write_once(NV_PSEC2_FBIF + FBIF_CTL, &ctl).ok()?;
+    regs.write_once(NV_PSEC2 + F_DMACTL, &0u32).ok()?;
+
+    // FBIF_TRANSCFG(0): TARGET_COHERENT_SYSMEM | MEM_TYPE_PHYSICAL (bits [2:0]=0b101).
+    let tc = (regs.read_once::<u32>(NV_PSEC2_FBIF + FBIF_TRANSCFG0).ok()? & !0x7) | 0x5;
+    regs.write_once(NV_PSEC2_FBIF + FBIF_TRANSCFG0, &tc).ok()?;
+
+    // DMA IMEM: src = booter_phys + codeOffset - imemVa; dest=imemPa(0); memOff=imemVa.
+    sec2_dma(
+        regs,
+        0,
+        imem_va,
+        booter_phys + code_offset as u64 - imem_va as u64,
+        imem_size as usize,
+        IMEM_DMA_CMD,
+    );
+    // DMA DMEM: src = booter_phys + dataOffset; dest=dmemPa(0); memOff=0 (dmemVa invalid).
+    sec2_dma(
+        regs,
+        0,
+        0,
+        booter_phys + data_offset as u64,
+        dmem_size as usize,
+        DMEM_DMA_CMD,
+    );
+
+    // BROM PKC signature-validation params.
+    regs.write_once(NV_PSEC2_BROM + BROM_PARAADDR0, &hs_sig_dmem_addr).ok()?;
+    regs.write_once(NV_PSEC2_BROM + BROM_ENGIDMASK, &engine_id_mask).ok()?;
+    regs.write_once(NV_PSEC2_BROM + BROM_CURR_UCODE_ID, &(ucode_id & 0xff)).ok()?;
+    regs.write_once(NV_PSEC2_BROM + BROM_MOD_SEL, &1u32).ok()?; // ALGO = RSA3K
+
+    // BOOTVEC = start of secure code; mailboxes = WPR-meta phys.
+    regs.write_once(NV_PSEC2 + F_BOOTVEC, &imem_va).ok()?;
+    regs.write_once(NV_PSEC2 + F_MAILBOX0, &((wpr_meta_phys & 0xffff_ffff) as u32)).ok()?;
+    regs.write_once(NV_PSEC2 + F_MAILBOX1, &((wpr_meta_phys >> 32) as u32)).ok()?;
+
+    // Start the SEC2 CPU. On GA10x the falcon front-end PRI is locked
+    // (`0xbadf…`), so STARTCPU is issued through CPUCTL_ALIAS (kflcnStartCpu uses
+    // ALIAS_EN, which is the norm here). Write both to be safe.
+    let cpuctl_reset = regs.read_once::<u32>(NV_PSEC2 + F_CPUCTL).unwrap_or(0);
+    let use_alias = cpuctl_reset & CPUCTL_ALIAS_EN != 0 || is_pri_locked(cpuctl_reset);
+    if use_alias {
+        regs.write_once(NV_PSEC2 + F_CPUCTL_ALIAS, &CPUCTL_STARTCPU).ok()?;
+    } else {
+        regs.write_once(NV_PSEC2 + F_CPUCTL, &CPUCTL_STARTCPU).ok()?;
+    }
+
+    // Wait for halt (CPUCTL.HALTED bit4).
+    let mut halted = false;
+    for _ in 0..10_000_000 {
+        let c = regs.read_once::<u32>(NV_PSEC2 + F_CPUCTL).unwrap_or(0);
+        if !is_pri_locked(c) && c & CPUCTL_HALTED_BIT != 0 {
+            halted = true;
+            break;
+        }
+    }
+    Some(BooterOutcome {
+        mailbox0: regs.read_once::<u32>(NV_PSEC2 + F_MAILBOX0).unwrap_or(0xffff_ffff),
+        mailbox1: regs.read_once::<u32>(NV_PSEC2 + F_MAILBOX1).unwrap_or(0),
+        halted,
+        wpr2_hi: regs.read_once::<u32>(NV_PFB_PRI_MMU_WPR2_ADDR_HI).unwrap_or(0),
+        cpuctl_reset,
+        cpuctl_start: regs.read_once::<u32>(NV_PSEC2 + F_CPUCTL).unwrap_or(0),
+    })
+}
+
 /// The GSP firmware image an architecture needs. Ampere (the RTX A4000/A5000,
 /// GA10x) uses `gsp_ga10x.bin`; Turing uses `gsp_tu10x.bin`. These are NVIDIA's
 /// signed HS RISC-V firmware blobs (from `linux-firmware`); they cannot be

@@ -158,6 +158,22 @@ pub(super) fn init_in_first_kthread() {
 /// DMA into VRAM (P1.5).
 const GSP_FW_PATHS: &[&str] = &["/gsp_ga10x.bin", "/lib/firmware/gsp_ga10x.bin"];
 
+/// Read an entire file from the (mounted) initramfs into a buffer, or `None` if
+/// it is absent. Used to pull the GSP boot ucodes staged alongside the firmware.
+fn read_initramfs(
+    path_resolver: &crate::fs::vfs::path::PathResolver,
+    path: &str,
+) -> Option<alloc::vec::Vec<u8>> {
+    use crate::fs::vfs::path::FsPath;
+    let fp = FsPath::try_from(path).ok()?;
+    let dentry = path_resolver.lookup(&fp).ok()?;
+    let size = dentry.size();
+    let mut buf = alloc::vec![0u8; size];
+    let n = dentry.inode().read_bytes_at(0, &mut buf).ok()?;
+    buf.truncate(n);
+    Some(buf)
+}
+
 /// P1.4: locate, read, and parse a staged GSP firmware image. Non-fatal — if no
 /// firmware was baked into the initramfs, this just logs that and returns.
 pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolver) {
@@ -215,17 +231,72 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                                     "nvidia:   radix3 built (P1.5b): root@{:#x}, {} fw pages via {} L2 pages, verified={}",
                                     rx.root_daddr, rx.fw_pages, rx.l2_pages, rx.verified,
                                 );
-                                let mut meta = aster_nvidia::GspFwWprMeta::new();
-                                meta.sysmem_addr_of_radix3_elf = rx.root_daddr as u64;
-                                meta.size_of_radix3_elf = s.bytes as u64;
-                                info!(
-                                    "nvidia:   GspFwWprMeta built (P1.5b): {} bytes, magic={:#x} rev={}, radix3_root={:#x}",
-                                    core::mem::size_of::<aster_nvidia::GspFwWprMeta>(),
-                                    meta.magic, meta.revision, meta.sysmem_addr_of_radix3_elf,
-                                );
-                                info!(
-                                    "nvidia:   P1.5c+ TODO: WPR2 FB layout + SEC2 HS booter + BROM kick + GSP_INIT_DONE (version-locked core)",
-                                );
+                                // P1.5c: stage the GSP RISC-V bootloader, read the
+                                // usable FB size, and build the full WPR2 layout the
+                                // SEC2 Booter reads. The ucodes are baked into the
+                                // initramfs next to gsp_ga10x.bin.
+                                let boot_desc = read_initramfs(path_resolver, "/gsprmboot.desc")
+                                    .and_then(|d| aster_nvidia::RiscvUcodeDesc::parse(&d));
+                                let boot_img = read_initramfs(path_resolver, "/gsprmboot.img");
+                                let bl_daddr = boot_img
+                                    .as_ref()
+                                    .and_then(|i| aster_nvidia::stage_bootloader(i));
+                                let fb = aster_nvidia::read_fb_size();
+                                match (boot_desc.as_ref(), boot_img.as_ref(), bl_daddr, fb) {
+                                    (Some(desc), Some(img), Some(bl), Some((fb_size, fb_raw))) => {
+                                        let meta = aster_nvidia::GspFwWprMeta::populate(
+                                            fb_size,
+                                            rx.root_daddr as u64,
+                                            s.bytes as u64,
+                                            bl as u64,
+                                            img.len() as u64,
+                                            desc,
+                                        );
+                                        info!(
+                                            "nvidia:   FB {:#x} ({} MB) [LOCAL_MEMORY_RANGE={:#010x}]; bootloader @{:#x} ({} B) code@{:#x} data@{:#x} manifest@{:#x} appVer={}",
+                                            fb_size, fb_size >> 20, fb_raw, bl, img.len(),
+                                            desc.monitor_code_offset, desc.monitor_data_offset,
+                                            desc.manifest_offset, desc.app_version,
+                                        );
+                                        info!(
+                                            "nvidia:   WPR2 layout (P1.5c): wprStart={:#x} wprEnd={:#x} heap={:#x}/{:#x} fwOff={:#x} bootBin={:#x} frts={:#x}/{:#x} nonWprHeap={:#x}/{:#x} radix3@{:#x}",
+                                            meta.gsp_fw_wpr_start, meta.gsp_fw_wpr_end,
+                                            meta.gsp_fw_heap_offset, meta.gsp_fw_heap_size,
+                                            meta.gsp_fw_offset, meta.boot_bin_offset,
+                                            meta.frts_offset, meta.frts_size,
+                                            meta.non_wpr_heap_offset, meta.non_wpr_heap_size,
+                                            meta.sysmem_addr_of_radix3_elf,
+                                        );
+                                        // P1.5c: run the SEC2 HS booter against this meta.
+                                        let booter = read_initramfs(path_resolver, "/booter_load.img");
+                                        let bsig = read_initramfs(path_resolver, "/booter_load.sig");
+                                        let bhdr = read_initramfs(path_resolver, "/booter_load.hdr");
+                                        match (booter, bsig, bhdr) {
+                                            (Some(b), Some(s2), Some(h)) => {
+                                                // patch metadata decoded from the 610.43.02 GA102 booter
+                                                // bindata (scripts/extract-gsp-booter.py): patchLoc=0x8a10,
+                                                // ucodeId=3, engineId=1, numSigs=2.
+                                                match aster_nvidia::run_booter(&b, &s2, &h, 0x8a10, 3, 1, 2, &meta) {
+                                                    Some(o) => info!(
+                                                        "nvidia:   SEC2 booter ran: halted={} MAILBOX0={:#010x} MAILBOX1={:#010x} WPR2_HI={:#010x} cpuctl(reset={:#010x} start={:#010x}) => {}",
+                                                        o.halted, o.mailbox0, o.mailbox1, o.wpr2_hi, o.cpuctl_reset, o.cpuctl_start,
+                                                        if o.mailbox0 == 0 && o.wpr2_hi != 0 {
+                                                            "AUTHENTICATED — WPR2 up (GSP boot proceeds)"
+                                                        } else {
+                                                            "not yet — iterate WPR meta/layout vs MAILBOX0"
+                                                        },
+                                                    ),
+                                                    None => info!("nvidia:   SEC2 booter run: staging/reg error"),
+                                                }
+                                            }
+                                            _ => info!("nvidia:   booter blobs missing (/booter_load.img|sig|hdr)"),
+                                        }
+                                    }
+                                    _ => info!(
+                                        "nvidia:   P1.5c: missing inputs (desc={} img={} fb={}) — bake gsprmboot.* into the initramfs",
+                                        boot_desc.is_some(), boot_img.is_some(), fb.is_some(),
+                                    ),
+                                }
                             }
                         }
                         None => info!(
