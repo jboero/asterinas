@@ -269,6 +269,7 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                                             }
                                         }
                                         info!("nvidia:   mmu_lock={:x?} vgaWorkspace@{:#x}", mmu_lock, meta.vga_workspace_offset);
+                                        info!("nvidia:   meta[256]={:02x?}", meta.as_bytes());
                                         info!(
                                             "nvidia:   FB {:#x} ({} MB) [LOCAL_MEMORY_RANGE={:#010x}]; bootloader @{:#x} ({} B) code@{:#x} data@{:#x} manifest@{:#x} appVer={}",
                                             fb_size, fb_size >> 20, fb_raw, bl, img.len(),
