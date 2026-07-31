@@ -88,6 +88,17 @@ pub fn read_mmu_lock() -> Option<(u64, u64)> {
     gsp::read_mmu_lock(REG_IO_MEM.get()?)
 }
 
+/// Locate a named section (offset, size) in a GSP firmware ELF container.
+pub fn find_fw_section(blob: &[u8], name: &str) -> Option<(usize, usize)> {
+    fw::find_section(blob, name).map(|s| (s.offset, s.size))
+}
+
+/// DMA-stage the GSP firmware signature; returns its GPU-visible address for
+/// `GspFwWprMeta.sysmem_addr_of_signature`. **P1.5c.**
+pub fn stage_signature(bytes: &[u8]) -> Option<usize> {
+    gsp::stage_signature(bytes)
+}
+
 pub use crate::gsp::BooterOutcome;
 
 /// Run the SEC2 HS Booter to authenticate our WPR meta and bring up WPR2

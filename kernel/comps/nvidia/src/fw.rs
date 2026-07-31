@@ -119,6 +119,35 @@ pub fn parse(blob: &[u8]) -> Option<FwContainer> {
     Some(out)
 }
 
+/// Locate a named section (e.g. `.fwsignature_ga10x`) in the firmware ELF
+/// container and return its byte range. The GSP boot needs the chip-family
+/// signature (`sysmem_addr_of_signature`) the Booter verifies.
+pub fn find_section(blob: &[u8], want: &str) -> Option<FwSection> {
+    if blob.get(0..4)? != b"\x7fELF" || blob.get(4)? != &2 {
+        return None;
+    }
+    let e_shoff = rd_u64(blob, 0x28)? as usize;
+    let e_shentsize = rd_u16(blob, 0x3a)? as usize;
+    let e_shnum = rd_u16(blob, 0x3c)?;
+    let e_shstrndx = rd_u16(blob, 0x3e)? as usize;
+    if e_shentsize < SH_ENTSIZE || e_shnum == 0 {
+        return None;
+    }
+    let shstr_hdr = e_shoff.checked_add(e_shstrndx.checked_mul(e_shentsize)?)?;
+    let shstrtab_off = rd_u64(blob, shstr_hdr.checked_add(SH_OFFSET)?)? as usize;
+    for i in 0..e_shnum as usize {
+        let hdr = e_shoff.checked_add(i.checked_mul(e_shentsize)?)?;
+        let name_idx = rd_u32(blob, hdr.checked_add(SH_NAME)?)?;
+        if sh_name(blob, shstrtab_off, name_idx) == Some(want) {
+            return Some(FwSection {
+                offset: rd_u64(blob, hdr.checked_add(SH_OFFSET)?)? as usize,
+                size: rd_u64(blob, hdr.checked_add(SH_SIZE)?)? as usize,
+            });
+        }
+    }
+    None
+}
+
 impl FwContainer {
     /// The firmware version string, if the `.fwversion` section is present and
     /// valid ASCII.

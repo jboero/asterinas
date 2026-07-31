@@ -245,7 +245,7 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                                 match (boot_desc.as_ref(), boot_img.as_ref(), bl_daddr, fb) {
                                     (Some(desc), Some(img), Some(bl), Some((fb_size, fb_raw))) => {
                                         let mmu_lock = aster_nvidia::read_mmu_lock();
-                                        let meta = aster_nvidia::GspFwWprMeta::populate(
+                                        let mut meta = aster_nvidia::GspFwWprMeta::populate(
                                             fb_size,
                                             rx.root_daddr as u64,
                                             s.bytes as u64,
@@ -254,6 +254,20 @@ pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolv
                                             desc,
                                             mmu_lock.map(|(lo, _)| lo),
                                         );
+                                        // P1.5c: stage the GA10x GSP-RM firmware signature the
+                                        // Booter verifies (sysmem_addr_of_signature).
+                                        if let Some((soff, ssz)) =
+                                            aster_nvidia::find_fw_section(blob, ".fwsignature_ga10x")
+                                        {
+                                            if let Some(sd) = blob
+                                                .get(soff..soff + ssz)
+                                                .and_then(aster_nvidia::stage_signature)
+                                            {
+                                                meta.sysmem_addr_of_signature = sd as u64;
+                                                meta.size_of_signature = ssz as u64;
+                                                info!("nvidia:   staged .fwsignature_ga10x ({} B) @{:#x}", ssz, sd);
+                                            }
+                                        }
                                         info!("nvidia:   mmu_lock={:x?} vgaWorkspace@{:#x}", mmu_lock, meta.vga_workspace_offset);
                                         info!(
                                             "nvidia:   FB {:#x} ({} MB) [LOCAL_MEMORY_RANGE={:#010x}]; bootloader @{:#x} ({} B) code@{:#x} data@{:#x} manifest@{:#x} appVer={}",

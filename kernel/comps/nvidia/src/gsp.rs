@@ -487,6 +487,13 @@ pub(crate) fn stage_wpr_meta(meta_bytes: &[u8]) -> Option<usize> {
     stage_bytes(&STAGED_META, meta_bytes)
 }
 
+/// The GSP-RM firmware signature (`.fwsignature_<chip>`) the Booter verifies.
+static STAGED_SIGNATURE: Once<DmaCoherent> = Once::new();
+/// Stage the GSP firmware signature; its phys addr goes in `sysmem_addr_of_signature`.
+pub(crate) fn stage_signature(bytes: &[u8]) -> Option<usize> {
+    stage_bytes(&STAGED_SIGNATURE, bytes)
+}
+
 /// The result of running the SEC2 Booter.
 #[derive(Debug, Clone, Copy)]
 pub struct BooterOutcome {
