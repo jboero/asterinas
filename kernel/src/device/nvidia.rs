@@ -151,3 +151,94 @@ pub(super) fn init_in_first_kthread() {
     }
     char::register(Arc::new(NvidiaGpu0)).expect("failed to register /dev/nvidia0 char device");
 }
+
+/// Candidate initramfs paths for the GSP-RM firmware image (P1.4). The driver
+/// probe runs before any filesystem exists, so the firmware is read here, after
+/// rootfs mount, and parsed to locate the `.fwimage` payload the GSP boot will
+/// DMA into VRAM (P1.5).
+const GSP_FW_PATHS: &[&str] = &["/gsp_ga10x.bin", "/lib/firmware/gsp_ga10x.bin"];
+
+/// P1.4: locate, read, and parse a staged GSP firmware image. Non-fatal — if no
+/// firmware was baked into the initramfs, this just logs that and returns.
+pub(super) fn load_gsp_firmware(path_resolver: &crate::fs::vfs::path::PathResolver) {
+    use crate::fs::vfs::path::FsPath;
+
+    let mut path = None;
+    for p in GSP_FW_PATHS {
+        if let Ok(fp) = FsPath::try_from(*p) {
+            if let Ok(found) = path_resolver.lookup(&fp) {
+                path = Some((*p, found));
+                break;
+            }
+        }
+    }
+    let Some((name, path)) = path else {
+        info!("nvidia: no GSP firmware staged in initramfs (P1.4 skipped)");
+        return;
+    };
+
+    let size = path.size();
+    let mut buf = alloc::vec![0u8; size];
+    let n = match path.inode().read_bytes_at(0, &mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            info!("nvidia: failed to read GSP firmware {}: {:?}", name, e);
+            return;
+        }
+    };
+    let blob = &buf[..n];
+
+    match aster_nvidia::parse_firmware(blob) {
+        Some(fw) => {
+            info!(
+                "nvidia: GSP firmware {} parsed (P1.4): {} bytes, machine={:#x} (0xf3=RISC-V), {} sections, {} signatures",
+                name, n, fw.machine, fw.section_count, fw.signature_count,
+            );
+            info!(
+                "nvidia:   .fwimage={} bytes, .fwversion={:?}",
+                fw.image.map(|s| s.size).unwrap_or(0),
+                fw.version_str(blob),
+            );
+            // P1.5a: stage the .fwimage into GPU-DMA-able sysmem.
+            if let Some(img) = fw.image {
+                if let Some(image) = blob.get(img.offset..img.offset + img.size) {
+                    match aster_nvidia::stage_firmware(image) {
+                        Some(s) => {
+                            info!(
+                                "nvidia:   .fwimage staged for DMA (P1.5a): {} bytes at GPU-phys {:#x}, verified={}",
+                                s.bytes, s.daddr, s.verified,
+                            );
+                            // P1.5b: build the radix3 page table over the staged
+                            // firmware + the byte-exact WPR descriptor the Booter reads.
+                            if let Some(rx) = aster_nvidia::build_radix3(s.daddr, s.bytes) {
+                                info!(
+                                    "nvidia:   radix3 built (P1.5b): root@{:#x}, {} fw pages via {} L2 pages, verified={}",
+                                    rx.root_daddr, rx.fw_pages, rx.l2_pages, rx.verified,
+                                );
+                                let mut meta = aster_nvidia::GspFwWprMeta::new();
+                                meta.sysmem_addr_of_radix3_elf = rx.root_daddr as u64;
+                                meta.size_of_radix3_elf = s.bytes as u64;
+                                info!(
+                                    "nvidia:   GspFwWprMeta built (P1.5b): {} bytes, magic={:#x} rev={}, radix3_root={:#x}",
+                                    core::mem::size_of::<aster_nvidia::GspFwWprMeta>(),
+                                    meta.magic, meta.revision, meta.sysmem_addr_of_radix3_elf,
+                                );
+                                info!(
+                                    "nvidia:   P1.5c+ TODO: WPR2 FB layout + SEC2 HS booter + BROM kick + GSP_INIT_DONE (version-locked core)",
+                                );
+                            }
+                        }
+                        None => info!(
+                            "nvidia:   .fwimage DMA staging failed ({} bytes)",
+                            img.size,
+                        ),
+                    }
+                }
+            }
+        }
+        None => info!(
+            "nvidia: GSP firmware {} present ({} bytes) but not a valid ELF container",
+            name, n
+        ),
+    }
+}

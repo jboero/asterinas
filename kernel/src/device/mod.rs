@@ -190,5 +190,10 @@ pub fn init_in_first_process(ctx: &Context) -> Result<()> {
     shm::init_in_first_process(&path_resolver, ctx)?;
     registry::init_in_first_process(&path_resolver)?;
 
+    // P1.4: if a GSP firmware image was staged in the initramfs, read and parse
+    // it now that the rootfs is mounted (the driver's PCI probe runs far too
+    // early for filesystem access). Non-fatal — absence just skips the step.
+    nvidia::load_gsp_firmware(&path_resolver);
+
     Ok(())
 }
